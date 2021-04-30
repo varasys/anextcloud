@@ -1,130 +1,172 @@
-#!/bin/sh -e
-echo "MIRROR=${MIRROR:="https://dl-2.alpinelinux.org/alpine"}"
-# adapted from https://wildwolf.name/a-simple-script-to-create-systemd-nspawn-alpine-container/
+#!/usr/bin/env sh
+set -eu # fail fast
 
-# shellcheck source=./conf.env
-[ -f "${CONF:="./conf.env"}" ] && . "$CONF"
-echo "installing alpine linux with:"
-echo "HOSTNAME=${HOSTNAME:="alpine"}"
-echo "DOMAIN=${DOMAIN:="domain.local"}"
-echo "TARGET=${TARGET:="/var/lib/machines/$HOSTNAME"}"
-echo "MIRROR=${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}"
-echo "VERSION=${VERSION:="latest-stable"}"
-echo "ARCH=${ARCH:="$(arch)"}"
-echo "IFACE=${IFACE:="mv-eth0"}"
-echo ""
-
+# restart as root if not root already
 if [ "$(id -u)" -ne "0" ]; then
     echo 'restarting as root ...' >&2
     exec "$0" "$@"
 fi
 
-if [ ! -d "$TARGET" ]; then
-    mkdir -p "$TARGET"
-elif [ "$(find "$TARGET" -maxdepth 1 ! -wholename "$TARGET" | wc -l)" -ne 0 ]; then
-    echo "target directory is not empty" >&2
-    ls -lA "$TARGET" >&2
-    printf "delete all files in %s? (y|n): " "$TARGET" >&2
+# define colors - change to empty strings if you don't want colors
+NC='\e[0m'
+RED='\e[0;31m'
+YELLOW='\e[0;33m'
+BLUE='\e[0;34m'
+PURPLE='\e[0;35m'
+
+log() {
+    msg=$1; shift
+    printf "%b$msg%b\n" "$BLUE" "$@" "$NC" >&2
+}
+warn() {
+    msg=$1; shift
+    printf "%b$msg%b\n" "$YELLOW" "$@" "$NC" >&2
+}
+error() {
+    msg=$1; shift
+    printf "%b$msg%b\n" "$RED" "$@" "$NC" >&2
+}
+prompt() { # does not include newline (so user input is on the same line)
+    msg=$1; shift
+    printf "%b$msg%b" "$PURPLE" "$@" "$NC" >&2
     IFS= read -r var
-    [ "$var" != "y" ] && echo "aborted since target directory is not empty" >&2 && exit 1
-    find "$TARGET" ! -wholename "$TARGET" -delete
-fi
+    printf "%s" "$var"
+}
 
-echo "installing alpine linux to: $TARGET ..." >&2
-apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
-# trap 'rm -rf "$apkdir"' EXIT
-echo "using temp directory $apkdir ..." >&2
+install_alpine() {
+    log "installing alpine linux ..."
 
-APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$ARCH" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
-echo "using: $MIRROR/$VERSION/main/$ARCH/$APKTOOLS" >&2
+    if [ ! -d "$TARGET" ]; then
+        mkdir -p "$TARGET"
+    elif [ "$(find "$TARGET" -maxdepth 1 ! -wholename "$TARGET" | wc -l)" -ne 0 ]; then
+        warn "target directory is not empty"
+        ls -lA "$TARGET" >&2
 
-curl -s -fL "$MIRROR/$VERSION/main/$ARCH/$APKTOOLS" | tar -xz -C "$apkdir"
+        [ ! "$(prompt "delete all files in '%s'? (y|n): " "$TARGET")" = "y" ] \
+            && error "aborted since target directory is not empty" \
+            && exit 1
+        # printf "${PURPLE}delete all files in '%s'? (y|n): ${NC}" "$TARGET" >&2
+        # IFS= read -r var
+        # [ "$var" != "y" ] && error "aborted since target directory is not empty" && exit 1
+        find "$TARGET" ! -wholename "$TARGET" -delete
+    fi
 
-mkdir -p "$apkdir/keys"
-cat > "$apkdir/keys/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub" <<EOF
------BEGIN PUBLIC KEY-----
-MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3v8/ye/V/t5xf4JiXLXa
-hWFRozsnmn3hobON20GdmkrzKzO/eUqPOKTpg2GtvBhK30fu5oY5uN2ORiv2Y2ht
-eLiZ9HVz3XP8Fm9frha60B7KNu66FO5P2o3i+E+DWTPqqPcCG6t4Znk2BypILcit
-wiPKTsgbBQR2qo/cO01eLLdt6oOzAaF94NH0656kvRewdo6HG4urbO46tCAizvCR
-CA7KGFMyad8WdKkTjxh8YLDLoOCtoZmXmQAiwfRe9pKXRH/XXGop8SYptLqyVVQ+
-tegOD9wRs2tOlgcLx4F/uMzHN7uoho6okBPiifRX+Pf38Vx+ozXh056tjmdZkCaV
-aQIDAQAB
------END PUBLIC KEY-----
-EOF
-# cat > "$apkdir/keys/alpine-devel@lists.alpinelinux.org-524d27bb.rsa.pub" <<EOF
-# -----BEGIN PUBLIC KEY-----
-# MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAr8s1q88XpuJWLCZALdKj
-# lN8wg2ePB2T9aIcaxryYE/Jkmtu+ZQ5zKq6BT3y/udt5jAsMrhHTwroOjIsF9DeG
-# e8Y3vjz+Hh4L8a7hZDaw8jy3CPag47L7nsZFwQOIo2Cl1SnzUc6/owoyjRU7ab0p
-# iWG5HK8IfiybRbZxnEbNAfT4R53hyI6z5FhyXGS2Ld8zCoU/R4E1P0CUuXKEN4p0
-# 64dyeUoOLXEWHjgKiU1mElIQj3k/IF02W89gDj285YgwqA49deLUM7QOd53QLnx+
-# xrIrPv3A+eyXMFgexNwCKQU9ZdmWa00MjjHlegSGK8Y2NPnRoXhzqSP9T9i2HiXL
-# VQIDAQAB
-# -----END PUBLIC KEY-----
-# EOF
+    log "installing alpine linux to: $TARGET ..."
+    apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
+    trap 'rm -rf "$apkdir"' EXIT
+    log "using temp directory $apkdir"
 
-    # --allow-untrusted \
-"$apkdir/sbin/apk.static" \
-    --keys-dir "$apkdir/keys" \
-    --verbose \
-    --progress \
-    --root "$TARGET" \
-    --arch "$ARCH" \
-    --initdb \
-    --repository "$MIRROR/$VERSION/main" \
-    --update-cache \
-    add alpine-base \
-        # nginx nginx-openrc \
-        # postgresql postgresql-contrib postgresql-openrc \
-        # mandoc apk-tools-doc
+    APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$ARCH" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
+    log "using: $MIRROR/$VERSION/main/$ARCH/$APKTOOLS"
 
-echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
-echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
+    curl -s -fL "$MIRROR/$VERSION/main/$ARCH/$APKTOOLS" | tar -xz -C "$apkdir"
 
-for i in $(seq 0 10); do
-    echo "pts/$i" >> "$TARGET/etc/securetty"
-done
+    mkdir -p "$apkdir/keys"
+    cat > "$apkdir/keys/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub" <<-EOF
+	-----BEGIN PUBLIC KEY-----
+	MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3v8/ye/V/t5xf4JiXLXa
+	hWFRozsnmn3hobON20GdmkrzKzO/eUqPOKTpg2GtvBhK30fu5oY5uN2ORiv2Y2ht
+	eLiZ9HVz3XP8Fm9frha60B7KNu66FO5P2o3i+E+DWTPqqPcCG6t4Znk2BypILcit
+	wiPKTsgbBQR2qo/cO01eLLdt6oOzAaF94NH0656kvRewdo6HG4urbO46tCAizvCR
+	CA7KGFMyad8WdKkTjxh8YLDLoOCtoZmXmQAiwfRe9pKXRH/XXGop8SYptLqyVVQ+
+	tegOD9wRs2tOlgcLx4F/uMzHN7uoho6okBPiifRX+Pf38Vx+ozXh056tjmdZkCaV
+	aQIDAQAB
+	-----END PUBLIC KEY-----
+	EOF
 
-sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
-echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
+    "$apkdir/sbin/apk.static" \
+        --keys-dir "$apkdir/keys" \
+        --verbose \
+        --progress \
+        --root "$TARGET" \
+        --arch "$ARCH" \
+        --initdb \
+        --repository "$MIRROR/$VERSION/main" \
+        --update-cache \
+        add alpine-base
 
-# for svc in bootmisc hostname syslog; do
-#     ln -s "/etc/init.d/$svc" "$TARGET/etc/runlevels/boot/$svc"
-# done
-
-# for svc in killprocs savecache; do
-#     ln -s "/etc/init.d/$svc" "$TARGET/etc/runlevels/shutdown/$svc"
-# done
-
-mkdir -p "/etc/systemd/nspawn"
-cat > "/etc/systemd/nspawn/${HOSTNAME}.nspawn" <<-EOF
+    mkdir -p "/etc/systemd/nspawn"
+    cat > "/etc/systemd/nspawn/${HOSTNAME}.nspawn" <<-EOF
 	[Exec]
 	PrivateUsers=false
-
+	
 	[Network]
 	VirtualEthernet=no
-	MACVLAN=eth0
-EOF
+	MACVLAN=$IFACE
+	EOF
 
-cat > "$TARGET/etc/network/interfaces" <<-EOF
+    cat > "$TARGET/etc/network/interfaces" <<-EOF
 	auto lo
 	iface lo inet loopback
+	
+	auto ${IFACE_PREFIX}${IFACE}
+	iface ${IFACE_PREFIX}${IFACE} inet dhcp
+	EOF
 
-	auto mv-eth0
-	iface mv-eth0 inet dhcp
-EOF
+    echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
+    echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
 
-systemd-nspawn --directory="$TARGET" --pipe sh -s <<-EOF
-rc-update add networking boot
-rc-update add bootmisc boot
-rc-update add hostname boot
-rc-update add syslog boot
-rc-update add killprocs shutdown
-rc-update add savecache shutdown
-echo "$HOSTNAME" > "/etc/hostname"
-echo "127.0.1.1	$HOSTNAME $HOSTNAME.$DOMAIN" >> "/etc/hosts"
-EOF
+    for i in $(seq 0 10); do
+        echo "pts/$i" >> "$TARGET/etc/securetty"
+    done
 
-echo "Success" >&2
-exit 0
+    sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
+    echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
+
+    systemd-nspawn --directory="$TARGET" --settings=false --pipe sh -s <<-EOF
+	rc-update add networking boot
+	rc-update add bootmisc boot
+	rc-update add hostname boot
+	rc-update add syslog boot
+	rc-update add killprocs shutdown
+	rc-update add savecache shutdown
+	echo "$HOSTNAME" > "/etc/hostname"
+	echo "127.0.1.1	$HOSTNAME $HOSTNAME.$DOMAIN" >> "/etc/hosts"
+	EOF
+
+    log "finished installing alpine linux"
+}
+
+install_nextcloud() {
+    log "installing nextcloud ..."
+    true
+}
+
+# set the CONF variable with the location of the configuration file (if it exists)
+if [ -n "${1-""}" ]; then # config file provided as argument
+    CONF="$1"
+elif [ -n "${CONF-""}" ]; then # config file provided as environment variable
+    : # NOP
+elif [ -f "./conf.env" ]; then # config file exists in the default location
+    CONF="./conf.env"
+fi
+
+# load variables from config file if the CONF environment variable is set
+if [ -n "${CONF-""}" ]; then
+    log "CONF='${CONF}'"
+    # shellcheck source=./conf.env # shellcheck directive needed here due to dynamic source in next line
+    . "$CONF"
+else
+    warn "no config file specified - using default config values"
+fi
+
+echo "# hostname of the container"
+printf "HOSTNAME='%s'\n\n" "${HOSTNAME:="alpine"}"
+echo "# domain of the container"
+printf "DOMAIN='%s'\n\n" "${DOMAIN:="domain.local"}"
+echo "# location of the container rootfs (on the host)"
+printf "TARGET='%s'\n\n" "${TARGET:="/var/lib/machines/$HOSTNAME"}"
+echo "# alpine linux mirror location"
+printf "MIRROR='%s'\n\n" "${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}"
+echo "# alpine linux stream"
+printf "VERSION='%s'\n\n" "${VERSION:="latest-stable"}"
+echo "# host machine achitecture"
+printf "ARCH='%s'\n\n" "${ARCH:="$(arch)"}"
+echo "# host machine network interface for MACVLAN"
+printf "IFACE='%s'\n\n" "${IFACE:="eth0"}"
+echo "# network interface prefix in the container"
+printf "IFACE_PREFIX='%s'\n\n" "${IFACE_PREFIX:="mv-"}"
+
+install_alpine
+install_nextcloud
+
