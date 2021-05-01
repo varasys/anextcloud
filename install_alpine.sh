@@ -1,12 +1,6 @@
 #!/usr/bin/env sh
 set -eu # fail fast
 
-# restart as root if not root already
-if [ "$(id -u)" -ne "0" ]; then
-	echo 'restarting as root ...' >&2
-	exec "$0" "$@"
-fi
-
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
 RED='\e[0;31m'
@@ -14,6 +8,7 @@ YELLOW='\e[0;33m'
 BLUE='\e[0;34m'
 PURPLE='\e[0;35m'
 
+# define logging utility functions
 log() {
 	msg=$1; shift
 	printf "%b$msg%b\n" "$BLUE" "$@" "$NC" >&2
@@ -33,7 +28,35 @@ prompt() { # does not include newline (so user input is on the same line)
 	printf "%s" "$var"
 }
 
+# this is the main entrypoint, and is called from the last line of this
+# script after all required functions are defined
+main() {
+	case "$(basename "$0" ".sh")" in
+		install_nextcloud)
+			install_nextcloud
+			;;
+		*)
+			install_alpine
+			;;
+	esac
+}
+
+case "$(basename "$0" ".sh")" in
+	install)
+		;;
+	container)
+		;;
+	*)
+		;;
+esac
+
 install_alpine() {
+	# restart as root if not root already
+	if [ "$(id -u)" -ne "0" ]; then
+		echo 'restarting as root ...' >&2
+		exec "$0" "$@"
+	fi
+
 	log "installing alpine linux ..."
 
 	if [ ! -d "$TARGET" ]; then
