@@ -1,5 +1,9 @@
 #!/usr/bin/env sh
-set -eu # fail fast
+set -e # fail fast
+
+# this script must be run as a file, it can't be piped via stdin for two reasons:
+# 1) it will restart itself if not run as root, and
+# 2) it pipes itself into the container, and then runs within the container to finish the configuration
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
@@ -28,34 +32,45 @@ prompt() { # does not include newline (so user input is on the same line)
 	printf "%s" "$var"
 }
 
-# this is the main entrypoint, and is called from the last line of this
-# script after all required functions are defined
-main() {
-	case "$(basename "$0" ".sh")" in
-		install_nextcloud)
-			install_nextcloud
-			;;
-		*)
-			install_alpine
-			;;
-	esac
-}
+setup_host() {
+	# this function is run in the host
 
-case "$(basename "$0" ".sh")" in
-	install)
-		;;
-	container)
-		;;
-	*)
-		;;
-esac
-
-install_alpine() {
 	# restart as root if not root already
 	if [ "$(id -u)" -ne "0" ]; then
 		echo 'restarting as root ...' >&2
 		exec "$0" "$@"
 	fi
+
+	if [ -n "$CONF" ]; then
+		log 'using configuration file at: %s' "$CONF"
+	elif [ -f "./conf.env" ]; then
+		log 'using configuration file at: %s' './conf.env'
+		CONF='./conf.env'
+	else
+		log 'CONF environment variable not set; using default config values'
+	fi
+	# shellcheck source=./conf.env # shellcheck directive needed here due to dynamic source in next line
+	[ -n "$CONF" ] && . "$CONF"
+
+	# print config variables to stdout for info
+	cat <<-EOF
+		# hostname of the container
+		HOSTNAME='${HOSTNAME:="alpine"}'
+		# domain of the container
+		DOMAIN='${DOMAIN:="domain.local"}'
+		# location of the container rootfs (on the host)
+		TARGET='${TARGET:="/var/lib/machines/$HOSTNAME"}'
+		# alpine linux mirror location
+		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
+		# alpine linux stream
+		VERSION='${VERSION:="latest-stable"}'
+		# host machine achitecture
+		ARCH='${ARCH:="$(arch)"}'
+		# host network interface for MACVLAN
+		IFACE='${IFACE:="eth0"}'
+		# network interface prefix in the container
+		IFACE_PREFIX='${IFACE_PREFIX:="mv-"}'
+	EOF
 
 	log "installing alpine linux ..."
 
@@ -114,6 +129,9 @@ install_alpine() {
 		MACVLAN=$IFACE
 	EOF
 
+	echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
+	echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
+
 	cat > "$TARGET/etc/network/interfaces" <<-EOF
 		auto lo
 		iface lo inet loopback
@@ -122,9 +140,6 @@ install_alpine() {
 		iface ${IFACE_PREFIX}${IFACE} inet dhcp
 	EOF
 
-	echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
-	echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
-
 	for i in $(seq 0 10); do
 		echo "pts/$i" >> "$TARGET/etc/securetty"
 	done
@@ -132,84 +147,62 @@ install_alpine() {
 	sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
 	echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
 
-	systemd-nspawn --directory="$TARGET" --settings=false --pipe sh -s <<-EOF
-		apk add man-db apk-tools-doc
-		rc-update add networking boot
-		rc-update add bootmisc boot
-		rc-update add hostname boot
-		rc-update add syslog boot
-		rc-update add killprocs shutdown
-		rc-update add savecache shutdown
-		echo "$HOSTNAME" > "/etc/hostname"
-		echo "127.0.1.1	$HOSTNAME $HOSTNAME.$DOMAIN" >> "/etc/hosts"
-	EOF
+	echo "$HOSTNAME" > "$TARGET/etc/hostname"
+	echo "127.0.1.1	$HOSTNAME $HOSTNAME.$DOMAIN" >> "$TARGET/etc/hosts"
 
-	log "finished installing alpine linux"
+	cp "$0" "$TARGET/root/install.sh"
+
+	systemd-nspawn \
+		--directory="$TARGET" \
+		--settings=false \
+		--console=pipe \
+		--setenv="SCRIPT_ENV=CONTAINER" \
+		sh -s < "$0"
+
+	log "finished"
 }
 
-install_nextcloud() {
-	log "installing nextcloud ..."
-	systemd-nspawn --directory="$TARGET" --settings=false --pipe sh -s <<-EOF
-		ln -s '/var/lib/postgresql/13/data' '/var/lib/postgresql/data'
-		export PGDATA='/var/lib/postgresql/data'
-		apk add postgresql postgresql-contrib postgresql-openrc
-		su postgres -c initdb
-		adduser -HDS nextcloud
-		mkdir -p /run/postgresql
-		chown postgres:postgres /run/postgresql
-		su postgres -c 'pg_ctl start'
-		su postgres -c psql <<-EOF2
-			CREATE USER nextcloud;
-			CREATE DATABASE nextcloud TEMPLATE template0 ENCODING 'UNICODE';
-			ALTER DATABASE nextcloud OWNER TO nextcloud;
-			GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
-		EOF2
-		su postgres -c 'pg_ctl stop'
-		rc-update add postgresql
+setup_container() {
+	# this function is meant to be run INSIDE the container (not the host)
+	# it is run automatically at the end of the setup_host function
+	echo 'in the container'
+
+	rc-update add networking boot
+	rc-update add bootmisc boot
+	rc-update add hostname boot
+	rc-update add syslog boot
+	rc-update add killprocs shutdown
+	rc-update add savecache shutdown
+
+	apk add postgresql postgresql-contrib postgresql-openrc
+	rm "/etc/conf.d/postgresql"
+	export PGDATA='/var/lib/postgresql/data'
+	su postgres -c initdb
+	adduser -HDS nextcloud
+	su postgres -c "pg_ctl -o '-k /tmp' start"
+	su postgres -c psql <<-EOF
+		CREATE USER nextcloud;
+		CREATE DATABASE nextcloud TEMPLATE template0 ENCODING 'UNICODE';
+		ALTER DATABASE nextcloud OWNER TO nextcloud;
+		GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
 	EOF
+	su postgres -c 'pg_ctl stop'
+	rc-update add postgresql
 
 	log "finished installing nextcloud"
 }
 
-# set the CONF variable with the location of the configuration file (if it exists)
-if [ -n "${1-""}" ]; then # config file provided as command argument
-	CONF="$1"
-elif [ -n "${CONF-""}" ]; then # config file provided as environment variable
-	: # NOOP 
-elif [ -f "./conf.env" ]; then # config file exists in the default location
-	log 'found config file in default location'
-	CONF="./conf.env"
-fi
-
-# load variables from config file if the CONF environment variable is set
-if [ -n "${CONF-""}" ]; then
-	log "CONF='${CONF}'"
-	# shellcheck source=./conf.env # shellcheck directive needed here due to dynamic source in next line
-	. "$CONF"
-else
-	warn "no config file specified - using default config values"
-fi
-
-# print config variables to stdout for info
-cat <<EOF
-# hostname of the container
-HOSTNAME='${HOSTNAME:="alpine"}'
-# domain of the container
-DOMAIN='${DOMAIN:="domain.local"}'
-# location of the container rootfs (on the host)
-TARGET='${TARGET:="/var/lib/machines/$HOSTNAME"}'
-# alpine linux mirror location
-MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
-# alpine linux stream
-VERSION='${VERSION:="latest-stable"}'
-# host machine achitecture
-ARCH='${ARCH:="$(arch)"}'
-# host network interface for MACVLAN
-IFACE='${IFACE:="eth0"}'
-# network interface prefix in the container
-IFACE_PREFIX='${IFACE_PREFIX:="mv-"}'
-EOF
-
-install_alpine
-install_nextcloud
-
+# When the script is run by the user the SCRIPT_ENV environment variable
+# is not set, so the setup_host function will be run. The setup_host
+# function will then copy this file into the container and run it via
+# `systemd-nspawn` with the SCRIPT_ENV environment variable set to
+# 'CONTAINER' which will cause the setup_container funtion to be run
+# (inside the container).
+case "${SCRIPT_ENV:='HOST'}" in
+	CONTAINER)
+		log "setting up the container\n"
+		setup_container "$@";;
+	*)
+		log "setting up the host\n"
+		setup_host "$@";;
+esac
