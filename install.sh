@@ -317,12 +317,12 @@ setup_container() {
 		--admin-user 'admin' \
 		--admin-pass '$ADMIN_PASS'"
 
-	# it is okay to stop the database now
-	su postgres -c 'pg_ctl stop'
-
 	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ \
 		config:system:set trusted_domains 1 \
 		--value='$HOSTNAME.$DOMAIN'"
+
+	# it is okay to stop the database now
+	su postgres -c 'pg_ctl stop'
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
