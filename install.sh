@@ -301,8 +301,6 @@ setup_container() {
 		-keyout /etc/ssl/nginx.key \
 		-out /etc/ssl/nginx.crt
 
-	log "finished installing nextcloud"
-
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
 	echo "$ADMIN_PASS" > "/root/nextcloud_password"
 	log "\n\nnextcloud admin user: 'admin'"
@@ -323,6 +321,8 @@ setup_container() {
 
 	# it is okay to stop the database now
 	su postgres -c 'pg_ctl stop'
+
+	log "finished installing nextcloud"
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
