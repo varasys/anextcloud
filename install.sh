@@ -194,7 +194,7 @@ setup_container() {
 		ALTER DATABASE nextcloud OWNER TO nextcloud;
 		GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
 	EOF
-	su postgres -c 'pg_ctl stop'
+	# don't stop the database, it needs to be running for a later step
 	rc-update add postgresql
 
 	log 'installing nextcloud tarball ...'
@@ -308,6 +308,7 @@ setup_container() {
 	log "\n\nnextcloud admin user: 'admin'"
 	log "nextcloud admin pass: '%s'\n\n" "$ADMIN_PASS"
 
+	log "performing initial nextcloud configuration - this may take some time ..."
 	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ maintenance:install \
 		--database 'pgsql' \
 		--database-name 'nextcloud' \
@@ -315,6 +316,9 @@ setup_container() {
 		--database-pass '' \
 		--admin-user 'admin' \
 		--admin-pass '$ADMIN_PASS'"
+
+	# it is okay to stop the database now
+	su postgres -c 'pg_ctl stop'
 
 	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ \
 		config:system:set trusted_domains 1 \
