@@ -289,6 +289,8 @@ setup_container() {
 	rc-update add nginx
 	rc-update add php-fpm7
 
+	sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
+
 	log 'creating self signed certificate ...'
 	apk add openssl
 	openssl req -x509 \
@@ -300,6 +302,23 @@ setup_container() {
 		-out /etc/ssl/nginx.crt
 
 	log "finished installing nextcloud"
+
+	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
+	echo "$ADMIN_PASS" > "/root/nextcloud_password"
+	log "\n\nnextcloud admin user: 'admin'"
+	log "nextcloud admin pass: '%s'\n\n" "$ADMIN_PASS"
+
+	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ maintenance:install \
+		--database 'pgsql' \
+		--database-name 'nextcloud' \
+		--database-user 'nextcloud' \
+		--database-pass '' \
+		--admin-user 'admin' \
+		--admin-pass '$ADMIN_PASS'"
+
+	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ \
+		config:system:set trusted_domains 1 \
+		--value='$HOSTNAME.$DOMAIN'"
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
