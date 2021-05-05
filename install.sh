@@ -236,6 +236,11 @@ setup_container() {
 	# REMOVE TLSv1.1 from /etc/nginx/nginx.conf (probably with sed)
 	# ENABLE gzipping of responses (I think)
 
+	# allow larger file uploads
+	sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' "/etc/php7/php.ini"
+	sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' "/etc/php7/php.ini"
+	sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' "/etc/nginx/nginx.conf"
+
 	mv "/etc/nginx/http.d/default.conf" "/etc/nginx/http.d/default.conf.orig"
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
 		server {
