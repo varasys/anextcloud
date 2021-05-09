@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -e # fail fast
+set -e # fail fast (this is important to ensure downloaded files are properly verified)
 
 # this script must be run as a file, it can't be piped via stdin for two reasons:
 # 1) it will restart itself if not run as root, and
@@ -55,13 +55,13 @@ setup_host() {
 	# print config variables to stdout for info
 	cat <<-EOF
 		# hostname of the container
-		HOSTNAME='${HOSTNAME:="alpine"}'
+		HOSTNAME='${HOSTNAME:="cloud"}'
 		# domain of the container
 		DOMAIN='${DOMAIN:="domain.local"}'
 		# location of the container rootfs (on the host)
 		TARGET='${TARGET:="/var/lib/machines/$HOSTNAME"}'
 		# alpine linux mirror location
-		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
+		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine/"}'
 		# alpine linux stream
 		VERSION='${VERSION:="latest-stable"}'
 		# host machine achitecture
@@ -70,11 +70,9 @@ setup_host() {
 		IFACE='${IFACE:="eth0"}'
 		# network interface prefix in the container
 		IFACE_PREFIX='${IFACE_PREFIX:="mv-"}'
-		# nextcloud tarball
-		NEXTCLOUD='${NEXTCLOUD:="https://download.nextcloud.com/server/releases/nextcloud-21.0.1.zip"}'
+		# nextcloud download url
+		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/nextcloud-21.0.1.tar.bz2"}'
 	EOF
-
-	log "installing alpine linux ..."
 
 	if [ ! -d "$TARGET" ]; then
 		mkdir -p "$TARGET"
@@ -161,7 +159,8 @@ setup_host() {
 		--setenv="SCRIPT_ENV=CONTAINER" \
 		--setenv="HOSTNAME=$HOSTNAME" \
 		--setenv="DOMAIN=$DOMAIN" \
-		--setenv="NEXTCLOUD=$NEXTCLOUD" \
+		--setenv="NEXTCLOUD_URL=$NEXTCLOUD_URL" \
+		--setenv="NEXTCLOUD_SIG=$NEXTCLOUD_SIG" \
 		sh -s < "$0"
 
 	log "finished"
@@ -171,7 +170,7 @@ setup_container() {
 	# this function is meant to be run INSIDE the container (not the host)
 	# it is run automatically at the end of the setup_host function
 	# this is adapted from https://wiki.alpinelinux.org/wiki/Nextcloud
-	echo 'in the container'
+	echo 'configuring container ...'
 
 	rc-update add networking boot
 	rc-update add bootmisc boot
@@ -198,10 +197,68 @@ setup_container() {
 	rc-update add postgresql
 
 	log 'installing nextcloud tarball ...'
-	apk add curl # use curl since wget wants to use IPV6
-	mkdir -p "/usr/share/webapps"
-	curl -L "$NEXTCLOUD" | busybox unzip -d "/usr/share/webapps" -
+	apk add curl gnupg # use curl since wget wants to use IPV6
+	gpg --import <<-EOF
+		-----BEGIN PGP PUBLIC KEY BLOCK-----
+		Version: GnuPG v2
 
+		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
+		M704NM/xbc23
+		=ykUA
+		-----END PGP PUBLIC KEY BLOCK-----
+	EOF
+
+	cd "/root"
+	curl -fLO "$NEXTCLOUD_URL"
+	curl -fLO "$NEXTCLOUD_SIG"
+	gpg --verify "./$(basename "$NEXTCLOUD_SIG")" "./$(basename "$NEXTCLOUD_URL")"
+	mkdir -p "/usr/share/webapps"
+	tar -jxvf "./$(basename "$NEXTCLOUD_URL")" -C "/usr/share/webapps"
 
 	log 'installing nginx and php7 ...'
 	apk add nginx php7 php7-fpm \
@@ -237,11 +294,15 @@ setup_container() {
 	# ENABLE gzipping of responses (I think)
 
 	# allow larger file uploads
-	sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' "/etc/php7/php.ini"
-	sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' "/etc/php7/php.ini"
-	sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' "/etc/nginx/nginx.conf"
+	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
+	sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
+	sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' '/etc/php7/php.ini'
+	sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' '/etc/php7/php.ini'
 
-	mv "/etc/nginx/http.d/default.conf" "/etc/nginx/http.d/default.conf.orig"
+	cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
+	sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' '/etc/nginx/nginx.conf'
+
+	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
 		server {
 		  #listen       [::]:80; #uncomment for IPv6 support
@@ -287,14 +348,35 @@ setup_container() {
 		}
 	EOF
 
-	sed -i '/^user =/ s/.*/user = nginx/' "/etc/php7/php-fpm.d/www.conf"
-	sed -i '/^group =/ s/.*/group = www-data/' "/etc/php7/php-fpm.d/www.conf"
-	sed -i 's/^;env/env/' "/etc/php7/php-fpm.d/www.conf"
+	cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
+	sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
+	sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
+	sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
 
 	rc-update add nginx
 	rc-update add php-fpm7
 
-	sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
+	log 'installing redis ...'
+	apk add redis php7-pecl-redis redis-openrc
+	rc-update add redis
+
+	warn 'redis config not implemented yet - see the script text for the details'
+	# add the following to /usr/share/webapps/nextcloud/config/config.php
+	# 'memcache.local' => '\OC\Memcache\APCu',
+	# 'memcache.distributed' => '\OC\Memcache\Redis',
+	# 'memcache.locking' => '\OC\Memcache\Redis',
+	# 'redis' => [
+	#      'host'     => '/run/redis/redis.sock',
+	#      'port'     => 0,
+	#      'dbindex'  => 0,
+	#      'timeout'  => 1.5,
+	# ],
+
+	cat >> '/etc/php7/php.ini' <<-EOF
+		redis.session.locking_enabled=1
+		redis.session.lock_retries=-1
+		redis.session.lock_wait_time=10000
+	EOF
 
 	log 'creating self signed certificate ...'
 	apk add openssl
@@ -335,12 +417,16 @@ setup_container() {
 # function will then copy this file into the container and run it via
 # `systemd-nspawn` with the SCRIPT_ENV environment variable set to
 # 'CONTAINER' which will cause the setup_container funtion to be run
-# (inside the container).
+# inside the container.
 case "${SCRIPT_ENV:='HOST'}" in
-	CONTAINER)
-		log "setting up the container\n"
-		setup_container "$@";;
+	'CONTAINER')
+		log "setting up the container ...\n"
+		setup_container "$@"
+		log "finished setting up container\n"
+		;;
 	*)
-		log "setting up the host\n"
-		setup_host "$@";;
+		log "setting up the host ...\n"
+		setup_host "$@"
+		log "finished setting up the host\n"
+		;;
 esac
