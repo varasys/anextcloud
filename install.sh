@@ -72,6 +72,8 @@ setup_host() {
 		IFACE_PREFIX='${IFACE_PREFIX:="mv-"}'
 		# nextcloud download url
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/nextcloud-21.0.1.tar.bz2"}'
+		# nextcloud signature download url
+		NEXTCLOUD_SIG='${NEXTCLOUD_SIG:="${NEXTCLOUD_URL}.asc"}'
 	EOF
 
 	if [ ! -d "$TARGET" ]; then
@@ -253,7 +255,7 @@ setup_container() {
 		-----END PGP PUBLIC KEY BLOCK-----
 	EOF
 
-	cd "/root"
+	cd "/tmp"
 	curl -fLO "$NEXTCLOUD_URL"
 	curl -fLO "$NEXTCLOUD_SIG"
 	gpg --verify "./$(basename "$NEXTCLOUD_SIG")" "./$(basename "$NEXTCLOUD_URL")"
@@ -292,6 +294,8 @@ setup_container() {
 	# DO THE FOLLOWING TO /etc/nginx.conf
 	# REMOVE TLSv1.1 from /etc/nginx/nginx.conf (probably with sed)
 	# ENABLE gzipping of responses (I think)
+
+	chown -R nginx:www-data "/usr/share/webapps"
 
 	# allow larger file uploads
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
@@ -390,8 +394,6 @@ setup_container() {
 
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
 	echo "$ADMIN_PASS" > "/root/nextcloud_password"
-	log "\n\nnextcloud admin user: 'admin'"
-	log "nextcloud admin pass: '%s'\n\n" "$ADMIN_PASS"
 
 	log "performing initial nextcloud configuration - this may take some time ..."
 	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ maintenance:install \
@@ -407,9 +409,11 @@ setup_container() {
 		--value='$HOSTNAME.$DOMAIN'"
 
 	# it is okay to stop the database now
-	su postgres -c 'pg_ctl stop'
+	su postgres -c 'pg_ctl stop --mode=smart'
 
 	log "finished installing nextcloud"
+	warn "\nnextcloud admin user: 'admin'"
+	warn "nextcloud admin pass: '%s'\n" "$ADMIN_PASS"
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
