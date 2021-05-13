@@ -5,6 +5,11 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 # 1) it will restart itself if not run as root, and
 # 2) it pipes itself into the container, and then runs within the container to finish the configuration
 
+# TODO install certbot (use env variable to know whether to run?)
+# TODO run cronjob to update lets encrypt cert
+# TODO implement APCu and redis for memory caching
+# TODO install clamav virus protection for uploaded files
+
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
 RED='\e[0;31m'
@@ -37,10 +42,11 @@ setup_host() {
 
 	# restart as root if not root already
 	if [ "$(id -u)" -ne "0" ]; then
-		echo 'restarting as root ...' >&2
+		warn 'restarting as root ...'
 		exec "$0" "$@"
 	fi
 
+	# work out where to get config input from
 	if [ -n "$CONF" ]; then
 		log 'using configuration file at: %s' "$CONF"
 	elif [ -f "./conf.env" ]; then
@@ -76,6 +82,7 @@ setup_host() {
 		NEXTCLOUD_SIG='${NEXTCLOUD_SIG:="${NEXTCLOUD_URL}.asc"}'
 	EOF
 
+	# create target directory or ensure it is empty
 	if [ ! -d "$TARGET" ]; then
 		mkdir -p "$TARGET"
 	elif [ "$(find "$TARGET" -maxdepth 1 ! -wholename "$TARGET" | wc -l)" -ne 0 ]; then
@@ -87,16 +94,19 @@ setup_host() {
 		find "$TARGET" ! -wholename "$TARGET" -delete
 	fi
 
-	log "installing alpine linux to: $TARGET ..."
+	log 'installing alpine linux to: %s ...' "$TARGET"
+
+	# create temp directory
 	apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
 	trap 'rm -rf "$apkdir"' EXIT
-	log "using temp directory: '$apkdir'"
 
 	APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$ARCH" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
 	log "using: $MIRROR/$VERSION/main/$ARCH/$APKTOOLS"
 
+	log 'downloading alpine linux ...'
 	curl -s -fL "$MIRROR/$VERSION/main/$ARCH/$APKTOOLS" | tar -xz -C "$apkdir"
 
+	log 'installing alpine linux key ...'
 	mkdir -p "$apkdir/keys"
 	cat > "$apkdir/keys/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub" <<-EOF
 		-----BEGIN PUBLIC KEY-----
@@ -110,6 +120,7 @@ setup_host() {
 		-----END PUBLIC KEY-----
 	EOF
 
+	log 'installing alpine linux ...'
 	"$apkdir/sbin/apk.static" \
 		--keys-dir "$apkdir/keys" \
 		--verbose \
@@ -121,6 +132,7 @@ setup_host() {
 		--update-cache \
 		add alpine-base
 
+	log 'creating systemd-nspawn settings file ...'
 	mkdir -p "/etc/systemd/nspawn"
 	cat > "/etc/systemd/nspawn/$(basename "$TARGET").nspawn" <<-EOF
 		[Exec]
@@ -131,9 +143,11 @@ setup_host() {
 		MACVLAN=$IFACE
 	EOF
 
+	log 'configuring alpine linux repositories ...'
 	echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
 	echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
 
+	log 'configuring container networking ...'
 	cat > "$TARGET/etc/network/interfaces" <<-EOF
 		auto lo
 		iface lo inet loopback
@@ -142,18 +156,23 @@ setup_host() {
 		iface ${IFACE_PREFIX}${IFACE} inet dhcp
 	EOF
 
+	log 'adding pseudo terminals ...'
 	for i in $(seq 0 10); do
 		echo "pts/$i" >> "$TARGET/etc/securetty"
 	done
 
+	log 'enabling console ...'
 	sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
 	echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
 
+	log 'setting hostname ...'
 	echo "$HOSTNAME" > "$TARGET/etc/hostname"
 	echo "127.0.1.1	$HOSTNAME $HOSTNAME.$DOMAIN" >> "$TARGET/etc/hosts"
 
+	log 'copying install script into container ...'
 	cp "$0" "$TARGET/root/install.sh"
 
+	log 'spawning container ...'
 	systemd-nspawn \
 		--directory="$TARGET" \
 		--settings=false \
@@ -172,8 +191,9 @@ setup_container() {
 	# this function is meant to be run INSIDE the container (not the host)
 	# it is run automatically at the end of the setup_host function
 	# this is adapted from https://wiki.alpinelinux.org/wiki/Nextcloud
-	echo 'configuring container ...'
+	log 'configuring container ...'
 
+	log 'enabling system services ...'
 	rc-update add networking boot
 	rc-update add bootmisc boot
 	rc-update add hostname boot
@@ -183,10 +203,16 @@ setup_container() {
 
 	log 'installing postgresql ...'
 	apk add postgresql postgresql-contrib postgresql-openrc
+
+	log 'configuring postgresql ...'
 	export PGDATA='/var/lib/postgresql/data'
 	echo "data_dir=\"$PGDATA\"" >> "/etc/conf.d/postgresql"
 	sed -i '/^conf_dir/ s/^/#/' "/etc/conf.d/postgresql"
+	
+	log 'initializing postgresql cluster ...'
 	su postgres -c initdb
+
+	log 'creating nextcloud database ...'
 	adduser -HDS nextcloud
 	su postgres -c "pg_ctl -o '-k /tmp' start"
 	su postgres -c psql <<-EOF
@@ -196,10 +222,14 @@ setup_container() {
 		GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
 	EOF
 	# don't stop the database, it needs to be running for a later step
+
+	log 'enabling postgresql database ...'
 	rc-update add postgresql
 
-	log 'installing nextcloud tarball ...'
+	log 'installing curl and gnupg ...'
 	apk add curl gnupg # use curl since wget wants to use IPV6
+
+	log 'importing nextcloud gpg key ...'
 	gpg --import <<-EOF
 		-----BEGIN PGP PUBLIC KEY BLOCK-----
 		Version: GnuPG v2
@@ -255,12 +285,17 @@ setup_container() {
 		-----END PGP PUBLIC KEY BLOCK-----
 	EOF
 
-	cd "/tmp"
+	log 'downloading nextcloud tarball and signature ...'
+	cd '/tmp'
 	curl -fLO "$NEXTCLOUD_URL"
 	curl -fLO "$NEXTCLOUD_SIG"
+
+	log 'verifying nextcloud tarball ...'
 	gpg --verify "./$(basename "$NEXTCLOUD_SIG")" "./$(basename "$NEXTCLOUD_URL")"
-	mkdir -p "/usr/share/webapps"
-	tar -jxvf "./$(basename "$NEXTCLOUD_URL")" -C "/usr/share/webapps"
+	
+	log 'extracting nextcloud tarball ...'
+	mkdir -p '/usr/share/webapps'
+	tar -jxvf "./$(basename "$NEXTCLOUD_URL")" -C '/usr/share/webapps'
 
 	log 'installing nginx and php7 ...'
 	apk add nginx php7 php7-fpm \
@@ -291,21 +326,26 @@ setup_container() {
 		php7-xmlreader \
 		php7-xmlwriter \
 		php7-zip
-	# DO THE FOLLOWING TO /etc/nginx.conf
-	# REMOVE TLSv1.1 from /etc/nginx/nginx.conf (probably with sed)
-	# ENABLE gzipping of responses (I think)
 
-	chown -R nginx:www-data "/usr/share/webapps"
+	log 'creating data directory ...'
+	mkdir -p '/var/www/nextcloud/data'
 
-	# allow larger file uploads
+	log 'updating directory ownership ...'
+	chown -R nginx:www-data '/var/www/nextcloud'
+	chown -R nginx:www-data '/usr/share/webapps/nextcloud'
+
+	log 'increasing upload file size ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
 	sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
 	sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' '/etc/php7/php.ini'
 	sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' '/etc/php7/php.ini'
-
-	cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
 	sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' '/etc/nginx/nginx.conf'
 
+	log 'disabling TLSv1.1 ...'
+	cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
+	sed -i '/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' '/etc/nginx/nginx.conf'
+
+	log 'configuring nginx ...'
 	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
 		server {
@@ -316,8 +356,8 @@ setup_container() {
 		}
 
 		server {
-		  #listen       [::]:443 ssl; #uncomment for IPv6 support
-		  listen       443 ssl;
+		  #listen       [::]:443 ssl http2; #uncomment for IPv6 support
+		  listen       443 ssl http2;
 		  server_name  $HOSTNAME.$DOMAIN;
 
 		  root /usr/share/webapps/nextcloud;
@@ -352,35 +392,36 @@ setup_container() {
 		}
 	EOF
 
+	log 'configuring php7 ...'
 	cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
 	sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
 	sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
 	sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
 
+	log 'enabling nginx and php7 ...'
 	rc-update add nginx
 	rc-update add php-fpm7
 
-	log 'installing redis ...'
-	apk add redis php7-pecl-redis redis-openrc
+	log 'installing APCu and redis ...'
+	apk add redis php7-pecl-redis redis-openrc php7-pecl-apcu
+	
+	log 'enabling redis ...'
 	rc-update add redis
 
-	warn 'redis config not implemented yet - see the script text for the details'
-	# add the following to /usr/share/webapps/nextcloud/config/config.php
-	# 'memcache.local' => '\OC\Memcache\APCu',
-	# 'memcache.distributed' => '\OC\Memcache\Redis',
-	# 'memcache.locking' => '\OC\Memcache\Redis',
-	# 'redis' => [
-	#      'host'     => '/run/redis/redis.sock',
-	#      'port'     => 0,
-	#      'dbindex'  => 0,
-	#      'timeout'  => 1.5,
-	# ],
+	log 'configuring redis ...'
+	cp '/etc/redis.conf' '/etc/redis.conf.orig'
+	# do not listen on tcp (only listen on local socket)
+	sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
+	# add nginx user to redis group
+	adduser nginx redis
 
-	cat >> '/etc/php7/php.ini' <<-EOF
-		redis.session.locking_enabled=1
-		redis.session.lock_retries=-1
-		redis.session.lock_wait_time=10000
-	EOF
+
+
+	# cat >> '/etc/php7/php.ini' <<-EOF
+	# 	redis.session.locking_enabled=1
+	# 	redis.session.lock_retries=-1
+	# 	redis.session.lock_wait_time=10000
+	# EOF
 
 	log 'creating self signed certificate ...'
 	apk add openssl
@@ -392,21 +433,51 @@ setup_container() {
 		-keyout /etc/ssl/nginx.key \
 		-out /etc/ssl/nginx.crt
 
+	log 'generating admin password ...'
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
 	echo "$ADMIN_PASS" > "/root/nextcloud_password"
 
+	# create wrapper script to run `occ` command as nginx user
+	log 'creating wrapper script at "/sbin/occ" ...'
+	cat > "/sbin/occ" <<-'EOF'
+		#!/usr/bin/env sh
+		set -eu
+
+		printf "running occ utility as user: nginx\n" >&2
+		CMD="/usr/bin/php /usr/share/webapps/nextcloud/occ $@"
+		su -s /bin/sh nginx -c "$CMD"
+	EOF
+	chmod +x '/sbin/occ'
+
 	log "performing initial nextcloud configuration - this may take some time ..."
-	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ maintenance:install \
+	occ maintenance:install \
 		--database 'pgsql' \
 		--database-name 'nextcloud' \
 		--database-user 'nextcloud' \
 		--database-pass '' \
 		--admin-user 'admin' \
-		--admin-pass '$ADMIN_PASS'"
+		--admin-pass "$ADMIN_PASS" \
+		--data-dir '/var/www/nextcloud/data'
 
-	su -s "/bin/sh" nginx -c "php /usr/share/webapps/nextcloud/occ \
-		config:system:set trusted_domains 1 \
-		--value='$HOSTNAME.$DOMAIN'"
+	log "setting additional nextcloud configuration values ..."
+	occ config:import <<-EOF
+		{
+		    "system": {
+		        "trusted_domains": [
+		            "localhost",
+		            "$HOSTNAME.$DOMAIN"
+		        ],
+		        "memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
+		        "memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
+		        "memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
+		        "redis": {
+		            "host": "/run/redis/redis.sock",
+		            "port": "0",
+		            "timeout": "1.5"
+		        }
+		    }
+		}
+	EOF
 
 	# it is okay to stop the database now
 	su postgres -c 'pg_ctl stop --mode=smart'
@@ -414,6 +485,8 @@ setup_container() {
 	log "finished installing nextcloud"
 	warn "\nnextcloud admin user: 'admin'"
 	warn "nextcloud admin pass: '%s'\n" "$ADMIN_PASS"
+
+	log "use the wrapper script at '/sbin/occ' to run maintenance commands"
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
@@ -424,13 +497,9 @@ setup_container() {
 # inside the container.
 case "${SCRIPT_ENV:='HOST'}" in
 	'CONTAINER')
-		log "setting up the container ...\n"
 		setup_container "$@"
-		log "finished setting up container\n"
 		;;
 	*)
-		log "setting up the host ...\n"
 		setup_host "$@"
-		log "finished setting up the host\n"
 		;;
 esac
