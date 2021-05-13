@@ -7,7 +7,6 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 # TODO install certbot (use env variable to know whether to run?)
 # TODO run cronjob to update lets encrypt cert
-# TODO install clamav virus protection for uploaded files
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
@@ -294,7 +293,7 @@ setup_container() {
 	
 	log 'extracting nextcloud tarball ...'
 	mkdir -p '/usr/share/webapps'
-	tar -jxvf "./$(basename "$NEXTCLOUD_URL")" -C '/usr/share/webapps'
+	tar -jxf "./$(basename "$NEXTCLOUD_URL")" -C '/usr/share/webapps'
 
 	log 'installing nginx and php7 ...'
 	apk add nginx php7 php7-fpm \
@@ -450,6 +449,19 @@ setup_container() {
 		--admin-pass "$ADMIN_PASS" \
 		--data-dir '/var/www/nextcloud/data'
 
+	log 'installing clamav antivirus ...'
+	apk add clamav
+
+	log 'enabling clamav and freshclam ...'
+	rc-update add clamd
+	rc-update add freshclam clamav-libunrar
+
+	log 'downloading clamav database ...'
+	freshclam --show-progress --foreground
+
+	log 'installing and enabling "files_antivirus" nextcloud app ...'
+	occ app:install 'files_antivirus'
+
 	log 'configuring nextcloud redis caching ...'
 	occ config:import <<-EOF
 		{
@@ -472,7 +484,7 @@ setup_container() {
 	log 'configuring php redis session management ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
 	sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
-	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "/run/redis/redis.sock"/' '/etc/php7/php.ini'
+	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/' '/etc/php7/php.ini'
 
 	cat >> '/etc/php7/php.ini' <<-EOF
 		[redis session management]
@@ -484,11 +496,16 @@ setup_container() {
 	# it is okay to stop the database now
 	su postgres -c 'pg_ctl stop --mode=smart'
 
-	log "finished installing nextcloud"
+	log 'finished installing nextcloud'
 	warn "\nnextcloud admin user: 'admin'"
 	warn "nextcloud admin pass: '%s'\n" "$ADMIN_PASS"
 
-	log "use the wrapper script at '/sbin/occ' to run maintenance commands"
+	# shellcheck disable=SC2016
+	log 'use `systemd-nspawn -bM %s` to manually start container' "$HOSTNAME"
+	# shellcheck disable=SC2016
+	log 'use `systemctl enable systemd-nspawn@%s.service` to automatically start container at boot' "$HOSTNAME"
+	log 'use the wrapper script at '/sbin/occ' to run maintenance commands inside the container'
+	log 'use the wrapper script at '/sbin/psql' to connect to the nextcloud db inside the container'
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
