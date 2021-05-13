@@ -7,6 +7,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 # TODO install certbot (use env variable to know whether to run?)
 # TODO run cronjob to update lets encrypt cert
+# TODO install pretty link thing
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
