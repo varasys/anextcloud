@@ -7,7 +7,6 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 # TODO install certbot (use env variable to know whether to run?)
 # TODO run cronjob to update lets encrypt cert
-# TODO implement APCu and redis for memory caching
 # TODO install clamav virus protection for uploaded files
 
 # define colors - change to empty strings if you don't want colors
@@ -473,9 +472,10 @@ setup_container() {
 	log 'configuring php redis session management ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
 	sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
-	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "/run/redis/redis.sock"' '/etc/php7/php.ini'
+	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "/run/redis/redis.sock"/' '/etc/php7/php.ini'
 
 	cat >> '/etc/php7/php.ini' <<-EOF
+		[redis session management]
 		redis.session.locking_enabled=1
 		redis.session.lock_retries=-1
 		redis.session.lock_wait_time=10000
