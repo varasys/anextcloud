@@ -415,14 +415,6 @@ setup_container() {
 	# add nginx user to redis group
 	adduser nginx redis
 
-
-
-	# cat >> '/etc/php7/php.ini' <<-EOF
-	# 	redis.session.locking_enabled=1
-	# 	redis.session.lock_retries=-1
-	# 	redis.session.lock_wait_time=10000
-	# EOF
-
 	log 'creating self signed certificate ...'
 	apk add openssl
 	openssl req -x509 \
@@ -449,7 +441,7 @@ setup_container() {
 	EOF
 	chmod +x '/sbin/occ'
 
-	log "performing initial nextcloud configuration - this may take some time ..."
+	log 'performing initial nextcloud configuration - this may take some time ...'
 	occ maintenance:install \
 		--database 'pgsql' \
 		--database-name 'nextcloud' \
@@ -459,7 +451,7 @@ setup_container() {
 		--admin-pass "$ADMIN_PASS" \
 		--data-dir '/var/www/nextcloud/data'
 
-	log "setting additional nextcloud configuration values ..."
+	log 'configuring nextcloud redis caching ...'
 	occ config:import <<-EOF
 		{
 		    "system": {
@@ -468,15 +460,25 @@ setup_container() {
 		            "$HOSTNAME.$DOMAIN"
 		        ],
 		        "memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
-		        "memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
 		        "memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
+		        "memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
 		        "redis": {
 		            "host": "/run/redis/redis.sock",
-		            "port": "0",
-		            "timeout": "1.5"
+		            "port": 0
 		        }
 		    }
 		}
+	EOF
+
+	log 'configuring php redis session management ...'
+	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
+	sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
+	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "/run/redis/redis.sock"' '/etc/php7/php.ini'
+
+	cat >> '/etc/php7/php.ini' <<-EOF
+		redis.session.locking_enabled=1
+		redis.session.lock_retries=-1
+		redis.session.lock_wait_time=10000
 	EOF
 
 	# it is okay to stop the database now
