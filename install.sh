@@ -466,6 +466,15 @@ setup_container() {
 	log 'installing and enabling "files_antivirus" nextcloud app ...'
 	occ app:install 'files_antivirus'
 
+	log 'installing common apps ...'
+	occ app:install 'calendar'
+	occ app:install 'contacts'
+	occ app:install 'groupfolders'
+	occ app:install 'notes'
+	occ app:install 'tasks'
+	occ app:install 'twofactor_totp'
+	occ app:install 'spreed'
+
 	# install and configure redis last otherwise the redis server will
 	# need to be running to do any operations with `occ`
 	log 'installing APCu and redis ...'
@@ -518,6 +527,7 @@ setup_container() {
 	log 'finished installing nextcloud'
 	warn "\nnextcloud admin user: 'admin'"
 	warn "nextcloud admin pass: '%s'\n" "$ADMIN_PASS"
+	log 'the admin password is saved in the container at "/root/nextcloud_password"'
 
 	# shellcheck disable=SC2016
 	log 'use `systemd-nspawn -bM %s` to manually start container' "$HOSTNAME"
@@ -529,10 +539,10 @@ setup_container() {
 
 # When the script is run by the user the SCRIPT_ENV environment variable
 # is not set, so the setup_host function will be run. The setup_host
-# function will then copy this file into the container and run it via
-# `systemd-nspawn` with the SCRIPT_ENV environment variable set to
-# 'CONTAINER' which will cause the setup_container funtion to be run
-# inside the container.
+# function will then copy this file into the container for future reference
+# and run it by piping it into `systemd-nspawn` with the SCRIPT_ENV
+# environment variable set to 'CONTAINER' which will cause the
+# setup_container funtion to be run inside the container.
 case "${SCRIPT_ENV:='HOST'}" in
 	'CONTAINER')
 		setup_container "$@"
