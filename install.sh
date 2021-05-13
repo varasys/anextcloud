@@ -190,6 +190,7 @@ setup_container() {
 	# it is run automatically at the end of the setup_host function
 	# this is adapted from https://wiki.alpinelinux.org/wiki/Nextcloud
 	log 'configuring container ...'
+	mkdir -p '/usr/local/sbin'
 
 	log 'enabling system services ...'
 	rc-update add networking boot
@@ -210,16 +211,31 @@ setup_container() {
 	log 'initializing postgresql cluster ...'
 	su postgres -c initdb
 
-	log 'creating nextcloud database ...'
+	# create wrapper script to run `psql` command as nextcloud user
+	log 'creating wrapper script at "/usr/local/sbin/psql" ...'
+	cat > "/usr/local/sbin/psql" <<-'EOF'
+		#!/usr/bin/env sh
+		set -eu
+
+		printf "running \`/usr/bin/psql\` utility as user: %s\n" "${PGUSER:="postgres"}" >&2
+		printf "set PGUSER environment variable to run as a different user\n" >&2
+		CMD="/usr/bin/psql $@"
+		su "$PGUSER" -c "$CMD"
+	EOF
+	chmod +x '/usr/local/sbin/psql'
+
+	log 'creating nextcloud system user ...'
 	adduser -HDS nextcloud
+
+	log 'creating nextcloud database ...'
 	su postgres -c "pg_ctl -o '-k /tmp' start"
-	su postgres -c psql <<-EOF
+	psql <<-EOF
 		CREATE USER nextcloud;
 		CREATE DATABASE nextcloud TEMPLATE template0 ENCODING 'UNICODE';
 		ALTER DATABASE nextcloud OWNER TO nextcloud;
 		GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
 	EOF
-	# don't stop the database, it needs to be running for a later step
+	# don't stop the database, it needs to be running for later steps
 
 	log 'enabling postgresql database ...'
 	rc-update add postgresql
@@ -400,19 +416,6 @@ setup_container() {
 	rc-update add nginx
 	rc-update add php-fpm7
 
-	log 'installing APCu and redis ...'
-	apk add redis php7-pecl-redis redis-openrc php7-pecl-apcu
-	
-	log 'enabling redis ...'
-	rc-update add redis
-
-	log 'configuring redis ...'
-	cp '/etc/redis.conf' '/etc/redis.conf.orig'
-	# do not listen on tcp (only listen on local socket)
-	sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
-	# add nginx user to redis group
-	adduser nginx redis
-
 	log 'creating self signed certificate ...'
 	apk add openssl
 	openssl req -x509 \
@@ -428,8 +431,8 @@ setup_container() {
 	echo "$ADMIN_PASS" > "/root/nextcloud_password"
 
 	# create wrapper script to run `occ` command as nginx user
-	log 'creating wrapper script at "/sbin/occ" ...'
-	cat > "/sbin/occ" <<-'EOF'
+	log 'creating wrapper script at "/usr/local/sbin/occ" ...'
+	cat > "/usr/local/sbin/occ" <<-'EOF'
 		#!/usr/bin/env sh
 		set -eu
 
@@ -437,7 +440,7 @@ setup_container() {
 		CMD="/usr/bin/php /usr/share/webapps/nextcloud/occ $@"
 		su -s /bin/sh nginx -c "$CMD"
 	EOF
-	chmod +x '/sbin/occ'
+	chmod +x '/usr/local/sbin/occ'
 
 	log 'performing initial nextcloud configuration - this may take some time ...'
 	occ maintenance:install \
@@ -450,17 +453,33 @@ setup_container() {
 		--data-dir '/var/www/nextcloud/data'
 
 	log 'installing clamav antivirus ...'
-	apk add clamav
+	apk add clamav clamav-libunrar
 
 	log 'enabling clamav and freshclam ...'
 	rc-update add clamd
-	rc-update add freshclam clamav-libunrar
+	rc-update add freshclam
 
 	log 'downloading clamav database ...'
+	# freshclam --show-progress --foreground --on-update-execute=EXIT_0
 	freshclam --show-progress --foreground
 
 	log 'installing and enabling "files_antivirus" nextcloud app ...'
 	occ app:install 'files_antivirus'
+
+	# install and configure redis last otherwise the redis server will
+	# need to be running to do any operations with `occ`
+	log 'installing APCu and redis ...'
+	apk add redis php7-pecl-redis redis-openrc php7-pecl-apcu
+	
+	log 'enabling redis ...'
+	rc-update add redis
+
+	log 'configuring redis ...'
+	cp '/etc/redis.conf' '/etc/redis.conf.orig'
+	# do not listen on tcp (only listen on local socket)
+	sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
+	# add nginx user to redis group
+	adduser nginx redis
 
 	log 'configuring nextcloud redis caching ...'
 	occ config:import <<-EOF
@@ -504,8 +523,8 @@ setup_container() {
 	log 'use `systemd-nspawn -bM %s` to manually start container' "$HOSTNAME"
 	# shellcheck disable=SC2016
 	log 'use `systemctl enable systemd-nspawn@%s.service` to automatically start container at boot' "$HOSTNAME"
-	log 'use the wrapper script at '/sbin/occ' to run maintenance commands inside the container'
-	log 'use the wrapper script at '/sbin/psql' to connect to the nextcloud db inside the container'
+	log 'use the wrapper script at '/usr/local/sbin/occ' to run maintenance commands inside the container'
+	log 'use the wrapper script at '/usr/local/sbin/psql' to connect to the nextcloud db inside the container'
 }
 
 # When the script is run by the user the SCRIPT_ENV environment variable
