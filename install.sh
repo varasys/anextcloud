@@ -591,6 +591,8 @@ setup_container() {
 	occ app:install 'twofactor_totp'
 	occ app:install 'spreed'
 	occ app:install 'drawio'
+	occ app:install 'files_mindmap'
+	occ app:install 'keeweb'
 
 	# install and configure redis last otherwise the redis server will
 	# need to be running to do any operations with `occ`
