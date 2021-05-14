@@ -362,48 +362,162 @@ setup_container() {
 
 	log 'configuring nginx ...'
 	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
+	# the following is from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
-		server {
-		  #listen       [::]:80; #uncomment for IPv6 support
-		  listen       80;
-		  return 301 https://\$host\$request_uri;
-		  server_name $HOSTNAME.$DOMAIN;
+		upstream php-handler {
+		    server 127.0.0.1:9000;
+		    #server unix:/var/run/php/php7.4-fpm.sock;
 		}
 
 		server {
-		  #listen       [::]:443 ssl http2; #uncomment for IPv6 support
-		  listen       443 ssl http2;
-		  server_name  $HOSTNAME.$DOMAIN;
+		    listen 80;
+		    listen [::]:80;
+		    server_name $HOSTNAME.$DOMAIN;
 
-		  root /usr/share/webapps/nextcloud;
-		  index  index.php index.html index.htm;
-		  disable_symlinks off;
+		    # Enforce HTTPS
+		    return 301 https://\$server_name\$request_uri;
+		}
 
-		  ssl_certificate      /etc/ssl/nginx.crt;
-		  ssl_certificate_key  /etc/ssl/nginx.key;
-		  ssl_session_timeout  5m;
+		server {
+		    listen 443      ssl http2;
+		    listen [::]:443 ssl http2;
+		    server_name $HOSTNAME.$DOMAIN;
 
-		  #Enable Perfect Forward Secrecy and ciphers without known vulnerabilities
-		  #Beware! It breaks compatibility with older OS and browsers (e.g. Windows XP, Android 2.x, etc.)
-		  #ssl_ciphers ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-RSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA;
-		  #ssl_prefer_server_ciphers  on;
+		    # Use Mozilla's guidelines for SSL/TLS settings
+		    # https://mozilla.github.io/server-side-tls/ssl-config-generator/
+		    ssl_certificate     /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt;
+		    ssl_certificate_key /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key;
 
+		    # HSTS settings
+		    # WARNING: Only add the preload option once you read about
+		    # the consequences in https://hstspreload.org/. This option
+		    # will add the domain to a hardcoded list that is shipped
+		    # in all major browsers and getting removed from this list
+		    # could take several months.
+		    #add_header Strict-Transport-Security "max-age=15768000; includeSubDomains; preload;" always;
 
-		  location / {
-		    try_files \$uri \$uri/ /index.html;
-		  }
+		    # set max upload size
+		    client_max_body_size 512M;
+		    fastcgi_buffers 64 4K;
 
-		  # pass the PHP scripts to FastCGI server listening on 127.0.0.1:9000
-		  location ~ [^/]\.php(/|$) {
-		    fastcgi_split_path_info ^(.+?\.php)(/.*)$;
-		    if (!-f \$document_root\$fastcgi_script_name) {
-		      return 404;
+		    # Enable gzip but do not remove ETag headers
+		    gzip on;
+		    gzip_vary on;
+		    gzip_comp_level 4;
+		    gzip_min_length 256;
+		    gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+		    gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+		    # Pagespeed is not supported by Nextcloud, so if your server is built
+		    # with the \`ngx_pagespeed\` module, uncomment this line to disable it.
+		    #pagespeed off;
+
+		    # HTTP response headers borrowed from Nextcloud \`.htaccess\`
+		    add_header Referrer-Policy                      "no-referrer"   always;
+		    add_header X-Content-Type-Options               "nosniff"       always;
+		    add_header X-Download-Options                   "noopen"        always;
+		    add_header X-Frame-Options                      "SAMEORIGIN"    always;
+		    add_header X-Permitted-Cross-Domain-Policies    "none"          always;
+		    add_header X-Robots-Tag                         "none"          always;
+		    add_header X-XSS-Protection                     "1; mode=block" always;
+
+		    # Remove X-Powered-By, which is an information leak
+		    fastcgi_hide_header X-Powered-By;
+
+		    # Path to the root of your installation
+		    root /usr/share/webapps/nextcloud;
+
+		    # Specify how to handle directories -- specifying \`/index.php\$request_uri\`
+		    # here as the fallback means that Nginx always exhibits the desired behaviour
+		    # when a client requests a path that corresponds to a directory that exists
+		    # on the server. In particular, if that directory contains an index.php file,
+		    # that file is correctly served; if it doesn't, then the request is passed to
+		    # the front-end controller. This consistent behaviour means that we don't need
+		    # to specify custom rules for certain paths (e.g. images and other assets,
+		    # \`/updater\`, \`/ocm-provider\`, \`/ocs-provider\`), and thus
+		    # \`try_files \$uri \$uri/ /index.php\$request_uri\`
+		    # always provides the desired behaviour.
+		    index index.php index.html /index.php\$request_uri;
+
+		    # Rule borrowed from \`.htaccess\` to handle Microsoft DAV clients
+		    location = / {
+		        if ( \$http_user_agent ~ ^DavClnt ) {
+		            return 302 /remote.php/webdav/\$is_args\$args;
+		        }
 		    }
-		    fastcgi_pass 127.0.0.1:9000;
-		    #fastcgi_pass unix:/run/php-fpm/socket;
-		    fastcgi_index index.php;
-		    include fastcgi.conf;
-		  }
+
+		    location = /robots.txt {
+		        allow all;
+		        log_not_found off;
+		        access_log off;
+		    }
+
+		    # Make a regex exception for \`/.well-known\` so that clients can still
+		    # access it despite the existence of the regex rule
+		    # \`location ~ /(\\.|autotest|...)\` which would otherwise handle requests
+		    # for \`/.well-known\`.
+		    location ^~ /.well-known {
+		        # The rules in this block are an adaptation of the rules
+		        # in \`.htaccess\` that concern \`/.well-known\`.
+
+		        location = /.well-known/carddav { return 301 /remote.php/dav/; }
+		        location = /.well-known/caldav  { return 301 /remote.php/dav/; }
+
+		        location /.well-known/acme-challenge    { try_files \$uri \$uri/ =404; }
+		        location /.well-known/pki-validation    { try_files \$uri \$uri/ =404; }
+
+		        # Let Nextcloud's API for \`/.well-known\` URIs handle all other
+		        # requests by passing them to the front-end controller.
+		        return 301 /index.php\$request_uri;
+		    }
+
+		    # Rules borrowed from \`.htaccess\` to hide certain paths from clients
+		    location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/)  { return 404; }
+		    location ~ ^/(?:\\.|autotest|occ|issue|indie|db_|console)                { return 404; }
+
+		    # Ensure this block, which passes PHP files to the PHP process, is above the blocks
+		    # which handle static assets (as seen below). If this block is not declared first,
+		    # then Nginx will encounter an infinite rewriting loop when it prepends \`/index.php\`
+		    # to the URI, resulting in a HTTP 500 error response.
+		    location ~ \\.php(?:$|/) {
+		        fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
+		        set \$path_info \$fastcgi_path_info;
+
+		        try_files \$fastcgi_script_name =404;
+
+		        include fastcgi_params;
+		        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+		        fastcgi_param PATH_INFO \$path_info;
+		        fastcgi_param HTTPS on;
+
+		        fastcgi_param modHeadersAvailable true;         # Avoid sending the security headers twice
+		        fastcgi_param front_controller_active true;     # Enable pretty urls
+		        fastcgi_pass php-handler;
+
+		        fastcgi_intercept_errors on;
+		        fastcgi_request_buffering off;
+		    }
+
+		    location ~ \\.(?:css|js|svg|gif)$ {
+		        try_files \$uri /index.php\$request_uri;
+		        expires 6M;         # Cache-Control policy borrowed from \`.htaccess\`
+		        access_log off;     # Optional: Don't log access to assets
+		    }
+
+		    location ~ \\.woff2?$ {
+		        try_files \$uri /index.php\$request_uri;
+		        expires 7d;         # Cache-Control policy borrowed from \`.htaccess\`
+		        access_log off;     # Optional: Don't log access to assets
+		    }
+
+		    # Rule borrowed from \`.htaccess\`
+		    location /remote {
+		        return 301 /remote.php\$request_uri;
+		    }
+
+		    location / {
+		        try_files \$uri \$uri/ /index.php\$request_uri;
+		    }
 		}
 	EOF
 
@@ -419,13 +533,14 @@ setup_container() {
 
 	log 'creating self signed certificate ...'
 	apk add openssl
+	mkdir -p '/etc/ssl/nginx'
 	openssl req -x509 \
 		-nodes \
 		-days 365 \
 		-newkey rsa:4096 \
 		-subj "/CN=$HOSTNAME.$DOMAIN" \
-		-keyout /etc/ssl/nginx.key \
-		-out /etc/ssl/nginx.crt
+		-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
+		-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
 
 	log 'generating admin password ...'
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
@@ -475,6 +590,7 @@ setup_container() {
 	occ app:install 'tasks'
 	occ app:install 'twofactor_totp'
 	occ app:install 'spreed'
+	occ app:install 'drawio'
 
 	# install and configure redis last otherwise the redis server will
 	# need to be running to do any operations with `occ`
