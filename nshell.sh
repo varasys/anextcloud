@@ -15,14 +15,14 @@ set -eu
 # of a systemd-nspawn container
 
 if [ "$#" -eq 0 ]; then
-	echo "error: missing arguments"
-	echo "usage: $0 machine [args]"
+	printf "error: missing arguments\n" >&2
+	echo "usage: $0 machine [args]\n" >&2
 	exit 1
 fi
 
 LEADER=$(machinectl show --property=Leader "$1")
 shift
-echo "entering namespace for $LEADER ..."
+printf "entering namespace for %s ...\n" "$LEADER" >&2
 
 if [ "$#" -eq 0 ]; then
 	set -- /bin/sh -l

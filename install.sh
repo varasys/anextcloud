@@ -7,7 +7,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 # TODO install certbot (use env variable to know whether to run?)
 # TODO run cronjob to update lets encrypt cert
-# TODO install pretty link thing
+# TODO enable cron https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/background_jobs_configuration.html
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
@@ -79,6 +79,8 @@ setup_host() {
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/nextcloud-21.0.1.tar.bz2"}'
 		# nextcloud signature download url
 		NEXTCLOUD_SIG='${NEXTCLOUD_SIG:="${NEXTCLOUD_URL}.asc"}'
+		# apps to install
+		APPS='${APPS:=""}'
 	EOF
 
 	# create target directory or ensure it is empty
@@ -181,6 +183,7 @@ setup_host() {
 		--setenv="DOMAIN=$DOMAIN" \
 		--setenv="NEXTCLOUD_URL=$NEXTCLOUD_URL" \
 		--setenv="NEXTCLOUD_SIG=$NEXTCLOUD_SIG" \
+		--setenv="APPS=$APPS" \
 		sh -s < "$0"
 
 	log "finished"
@@ -214,7 +217,7 @@ setup_container() {
 
 	# create wrapper script to run `psql` command as nextcloud user
 	log 'creating wrapper script at "/usr/local/sbin/psql" ...'
-	cat > "/usr/local/sbin/psql" <<-'EOF'
+	cat > '/usr/local/sbin/psql' <<-'EOF'
 		#!/usr/bin/env sh
 		set -eu
 
@@ -224,6 +227,20 @@ setup_container() {
 		su "$PGUSER" -c "$CMD"
 	EOF
 	chmod +x '/usr/local/sbin/psql'
+
+	log 'creating wrapper script at "/usr/local/sbin/pg_dump" ...'
+	cat > '/usr/local/sbin/pg_dump' <<-'EOF'
+		#!/usr/bin/env sh
+		set -eu
+
+		printf "running \`/usr/bin/pg_dump\` utility as user: %s\n" "${PGUSER:="postgres"}" >&2
+		printf "set PGUSER environment variable to run as a different user\n" >&2
+		if [ "$#" -eq 0 ]; then
+		    set - -cvC nextcloud
+		fi
+		CMD="/usr/bin/pg_dump $@"
+		su "$PGUSER" -c "$CMD"
+	EOF
 
 	log 'creating nextcloud system user ...'
 	adduser -HDS nextcloud
@@ -582,17 +599,14 @@ setup_container() {
 	log 'installing and enabling "files_antivirus" nextcloud app ...'
 	occ app:install 'files_antivirus'
 
-	log 'installing common apps ...'
-	occ app:install 'calendar'
-	occ app:install 'contacts'
-	occ app:install 'groupfolders'
-	occ app:install 'notes'
-	occ app:install 'tasks'
-	occ app:install 'twofactor_totp'
-	occ app:install 'spreed'
-	occ app:install 'drawio'
-	occ app:install 'files_mindmap'
-	occ app:install 'keeweb'
+	log 'installing nextcloud apps ...'
+	for app in $APPS; do
+		if [ "$app" = "richdocumentscode" ] && [ "$(arch)" = 'aarch64' ]; then
+			occ app:install 'richdocumentscode_arm64'
+		else
+			occ app:install "$app"
+		fi
+	done
 
 	# install and configure redis last otherwise the redis server will
 	# need to be running to do any operations with `occ`
