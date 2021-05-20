@@ -8,6 +8,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 # TODO install certbot (use env variable to know whether to run?)
 # TODO run cronjob to update lets encrypt cert
 # TODO enable cron https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/background_jobs_configuration.html
+# TODO setup haproxy https://www.haproxy.com/blog/enhanced-ssl-load-balancing-with-server-name-indication-sni-tls-extension/
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
@@ -256,7 +257,7 @@ setup_container() {
 	# don't stop the database, it needs to be running for later steps
 
 	log 'enabling postgresql database ...'
-	rc-update add postgresql
+	rc-update add postgresql default
 
 	log 'installing curl and gnupg ...'
 	apk add curl gnupg # use curl since wget wants to use IPV6
@@ -382,8 +383,8 @@ setup_container() {
 	# the following is from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
 		upstream php-handler {
-		    server 127.0.0.1:9000;
-		    #server unix:/var/run/php/php7.4-fpm.sock;
+		    #server 127.0.0.1:9000;
+				server unix:/var/run/php-fpm7/php-fpm.sock;
 		}
 
 		server {
@@ -542,11 +543,14 @@ setup_container() {
 	cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
 	sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
 	sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
+	sed -i '/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' '/etc/php7/php-fpm.d/www.conf'
+	sed -i '/^;listen\.owner =/ s/.*/listen.owner = nginx/' '/etc/php7/php-fpm.d/www.conf'
+	sed -i '/^;listen\.group =/ s/.*/listen.group = www-data/' '/etc/php7/php-fpm.d/www.conf'
 	sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
 
 	log 'enabling nginx and php7 ...'
-	rc-update add nginx
-	rc-update add php-fpm7
+	rc-update add nginx default
+	rc-update add php-fpm7 default
 
 	log 'creating self signed certificate ...'
 	apk add openssl
@@ -589,8 +593,8 @@ setup_container() {
 	apk add clamav clamav-libunrar
 
 	log 'enabling clamav and freshclam ...'
-	rc-update add clamd
-	rc-update add freshclam
+	rc-update add clamd default
+	rc-update add freshclam default
 
 	log 'downloading clamav database ...'
 	# freshclam --show-progress --foreground --on-update-execute=EXIT_0
@@ -614,7 +618,7 @@ setup_container() {
 	apk add redis php7-pecl-redis redis-openrc php7-pecl-apcu
 	
 	log 'enabling redis ...'
-	rc-update add redis
+	rc-update add redis default
 
 	log 'configuring redis ...'
 	cp '/etc/redis.conf' '/etc/redis.conf.orig'
@@ -652,6 +656,12 @@ setup_container() {
 		redis.session.locking_enabled=1
 		redis.session.lock_retries=-1
 		redis.session.lock_wait_time=10000
+	EOF
+
+	log 'configuring cron ...'
+	rc-update add crond default
+	crontab -u nginx - <<-EOF
+		*/5  *  *  *  * php -f /usr/share/webapps/nextcloud/cron.php
 	EOF
 
 	# it is okay to stop the database now
