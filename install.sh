@@ -37,7 +37,7 @@ prompt() { # does not include newline (so user input is on the same line)
 	printf "%s" "$var"
 }
 
-alter_config() { # convievence function to run `sed` inplace with multiple expressions
+alter_config() { # convenience function to run `sed` inplace with multiple expressions
 	file="$1"
 	shift
 	for exp in "$@"; do
@@ -223,6 +223,10 @@ setup_container() {
 		export EDITOR=/usr/bin/nvim
 		alias vim=/usr/bin/nvim
 	EOF
+	mkdir -p '/usr/share/nvim'
+	cat > '/usr/share/nvim/sysinit.vim' <<-EOF
+		colorscheme default
+	EOF
 
 	log 'enabling system services ...'
 	rc-update add networking boot
@@ -292,7 +296,7 @@ setup_container() {
 	rc-update add postgresql default
 
 	log 'installing curl and gnupg ...'
-	apk add curl gnupg # use curl since wget wants to use IPV6
+	apk add curl gnupg # use `curl` instead of `wget` (since wget wants to use IPV6)
 
 	log 'importing nextcloud gpg key ...'
 	gpg --import <<-EOF
@@ -432,7 +436,7 @@ setup_container() {
 	log 'configuring nginx ...'
 	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
 	# the following is from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
-	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
+	cat > "/etc/nginx/http.d/nextcloud.conf" <<-EOF
 		upstream php-handler {
 		    #server 127.0.0.1:9000;
 		    server unix:/var/run/php-fpm7/php-fpm.sock;
@@ -596,14 +600,14 @@ setup_container() {
 
 	log 'configuring php7 ...'
 	cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
+	# shellcheck disable=SC2016
 	alter_config '/etc/php7/php-fpm.d/www.conf' \
 		'/^user =/ s/.*/user = nginx/' \
 		'/^group =/ s/.*/group = www-data/' \
 		'/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' \
 		'/^;listen\.owner =/ s/.*/listen.owner = nginx/' \
 		'/^;listen\.group =/ s/.*/listen.group = www-data/' \
-		's/^;env/env/' \
-		# '/^;chroot =/ s/.*/chroot = \/usr\/share\/webapps\/nextcloud/'
+		's/^;env/env/'
 	# sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
 	# sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
 	# sed -i '/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' '/etc/php7/php-fpm.d/www.conf'
