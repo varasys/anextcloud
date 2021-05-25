@@ -12,10 +12,10 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
-RED='\e[0;31m'
-YELLOW='\e[0;33m'
-BLUE='\e[0;34m'
-PURPLE='\e[0;35m'
+RED='\e[0;31;1m'
+YELLOW='\e[0;33;1m'
+BLUE='\e[0;34;1m'
+PURPLE='\e[0;35;1m'
 
 # define logging utility functions
 log() {
@@ -35,6 +35,14 @@ prompt() { # does not include newline (so user input is on the same line)
 	printf "%b$msg%b" "$PURPLE" "$@" "$NC" >&2
 	IFS= read -r var
 	printf "%s" "$var"
+}
+
+alter_config() { # convievence function to run `sed` inplace with multiple expressions
+	file="$1"
+	shift
+	for exp in "$@"; do
+		sed -i "$exp" "$file"
+	done
 }
 
 setup_host() {
@@ -70,8 +78,6 @@ setup_host() {
 		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine/"}'
 		# alpine linux stream
 		VERSION='${VERSION:="latest-stable"}'
-		# host machine achitecture
-		ARCH='${ARCH:="$(arch)"}'
 		# host network interface for MACVLAN
 		IFACE='${IFACE:="eth0"}'
 		# network interface prefix in the container
@@ -102,11 +108,11 @@ setup_host() {
 	apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
 	trap 'rm -rf "$apkdir"' EXIT
 
-	APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$ARCH" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
-	log "using: $MIRROR/$VERSION/main/$ARCH/$APKTOOLS"
+	APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$(arch)" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
+	log "using: $MIRROR/$VERSION/main/$(arch)/$APKTOOLS"
 
-	log 'downloading alpine linux ...'
-	curl -s -fL "$MIRROR/$VERSION/main/$ARCH/$APKTOOLS" | tar -xz -C "$apkdir"
+	log 'downloading alpine linux apk-tools ...'
+	curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tar -xz -C "$apkdir"
 
 	log 'installing alpine linux key ...'
 	mkdir -p "$apkdir/keys"
@@ -123,15 +129,15 @@ setup_host() {
 	EOF
 
 	log 'installing alpine linux ...'
+	mkdir -p "$(pwd)/cache/apk"
 	"$apkdir/sbin/apk.static" \
 		--keys-dir "$apkdir/keys" \
 		--verbose \
 		--progress \
 		--root "$TARGET" \
-		--arch "$ARCH" \
 		--initdb \
 		--repository "$MIRROR/$VERSION/main" \
-		--update-cache \
+		--cache-dir "$(pwd)/cache/apk" \
 		add alpine-base
 
 	log 'creating systemd-nspawn settings file ...'
@@ -143,11 +149,19 @@ setup_host() {
 		[Network]
 		VirtualEthernet=no
 		MACVLAN=$IFACE
+
+		[Files]
+		Bind=/var/lib/haproxy/$HOSTNAME.$DOMAIN:/run/nginx
 	EOF
+	mkdir -p "/var/lib/haproxy/$HOSTNAME.$DOMAIN"
 
 	log 'configuring alpine linux repositories ...'
-	echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
-	echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
+	cat > "$TARGET/etc/apk/repositories" <<-EOF
+		$MIRROR/$VERSION/main
+		$MIRROR/$VERSION/community
+	EOF
+	# echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
+	# echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
 
 	log 'configuring container networking ...'
 	cat > "$TARGET/etc/network/interfaces" <<-EOF
@@ -164,7 +178,9 @@ setup_host() {
 	done
 
 	log 'enabling console ...'
-	sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
+	alter_config "$TARGET/etc/inittab" \
+		'/tty[0-9]:/ s/^/#/'
+	# sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
 	echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
 
 	log 'setting hostname ...'
@@ -179,12 +195,13 @@ setup_host() {
 		--directory="$TARGET" \
 		--settings=false \
 		--console=pipe \
-		--setenv="SCRIPT_ENV=CONTAINER" \
+		--setenv='SCRIPT_ENV=CONTAINER' \
 		--setenv="HOSTNAME=$HOSTNAME" \
 		--setenv="DOMAIN=$DOMAIN" \
 		--setenv="NEXTCLOUD_URL=$NEXTCLOUD_URL" \
 		--setenv="NEXTCLOUD_SIG=$NEXTCLOUD_SIG" \
 		--setenv="APPS=$APPS" \
+		--bind="$(pwd)/cache:/tmp/cache" \
 		sh -s < "$0"
 
 	log "finished"
@@ -195,7 +212,17 @@ setup_container() {
 	# it is run automatically at the end of the setup_host function
 	# this is adapted from https://wiki.alpinelinux.org/wiki/Nextcloud
 	log 'configuring container ...'
+
 	mkdir -p '/usr/local/sbin'
+	# alias to use the cache directory which which is bind mounted into the container
+	alias apk='apk --cache-dir=/tmp/cache/apk'
+
+	log 'installing neovim (for debugging when needed) ...'
+	apk add neovim
+	cat > '/etc/profile.d/nvim.sh' <<-EOF
+		export EDITOR=/usr/bin/nvim
+		alias vim=/usr/bin/nvim
+	EOF
 
 	log 'enabling system services ...'
 	rc-update add networking boot
@@ -211,7 +238,9 @@ setup_container() {
 	log 'configuring postgresql ...'
 	export PGDATA='/var/lib/postgresql/data'
 	echo "data_dir=\"$PGDATA\"" >> "/etc/conf.d/postgresql"
-	sed -i '/^conf_dir/ s/^/#/' "/etc/conf.d/postgresql"
+	alter_config '/etc/conf.d/postgresql' \
+		'/^conf_dir/ s/^/#/'
+	# sed -i '/^conf_dir/ s/^/#/' "/etc/conf.d/postgresql"
 	
 	log 'initializing postgresql cluster ...'
 	su postgres -c initdb
@@ -228,6 +257,7 @@ setup_container() {
 		su "$PGUSER" -c "$CMD"
 	EOF
 	chmod +x '/usr/local/sbin/psql'
+	ln -s '/usr/local/sbin/psql' '/root/psql'
 
 	log 'creating wrapper script at "/usr/local/sbin/pg_dump" ...'
 	cat > '/usr/local/sbin/pg_dump' <<-'EOF'
@@ -242,6 +272,8 @@ setup_container() {
 		CMD="/usr/bin/pg_dump $@"
 		su "$PGUSER" -c "$CMD"
 	EOF
+	chmod +x '/usr/local/sbin/pg_dump'
+	ln -s '/usr/local/sbin/pg_dump' '/root/pg_dump'
 
 	log 'creating nextcloud system user ...'
 	adduser -HDS nextcloud
@@ -319,9 +351,10 @@ setup_container() {
 	EOF
 
 	log 'downloading nextcloud tarball and signature ...'
-	cd '/tmp'
-	curl -fLO "$NEXTCLOUD_URL"
-	curl -fLO "$NEXTCLOUD_SIG"
+	mkdir -p '/tmp/cache/nextcloud'
+	cd '/tmp/cache/nextcloud'
+	[ -f "$(basename "$NEXTCLOUD_URL")" ] || curl -fLO "$NEXTCLOUD_URL"
+	[ -f "$(basename "$NEXTCLOUD_SIG")" ] || curl -fLO "$NEXTCLOUD_SIG"
 
 	log 'verifying nextcloud tarball ...'
 	gpg --verify "./$(basename "$NEXTCLOUD_SIG")" "./$(basename "$NEXTCLOUD_URL")"
@@ -367,16 +400,34 @@ setup_container() {
 	chown -R nginx:www-data '/var/www/nextcloud'
 	chown -R nginx:www-data '/usr/share/webapps/nextcloud'
 
+	log 'creating wrapper script utility to view nextcloud log ...'
+	apk add jq # use jq to format the json log
+	cat > '/usr/local/sbin/nclog' <<-'EOF'
+	#!/usr/bin/env sh
+	set -eu
+
+	tail -f '/var/www/nextcloud/data/nextcloud.log' | jq
+	EOF
+	chmod +x '/usr/local/sbin/nclog'
+	ln -s '/usr/local/sbin/nclog' '/root/nclog'
+
 	log 'increasing upload file size ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
-	sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
-	sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' '/etc/php7/php.ini'
-	sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' '/etc/php7/php.ini'
-	sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' '/etc/nginx/nginx.conf'
+	alter_config '/etc/php7/php.ini' \
+		'/^memory_limit =/ s/.*/memory_limit = 1G/' \
+		'/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' \
+		'/^post_max_size =/ s/.*/post_max_size = 16G/'
+	# sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
+	# sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' '/etc/php7/php.ini'
+	# sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' '/etc/php7/php.ini'
 
-	log 'disabling TLSv1.1 ...'
+	log 'disabling TLSv1.1 and increasing nginx client max body size ...'
 	cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
-	sed -i '/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' '/etc/nginx/nginx.conf'
+	alter_config '/etc/nginx/nginx.conf' \
+		'/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' \
+		'/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/'
+	# sed -i '/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' '/etc/nginx/nginx.conf'
+	# sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' '/etc/nginx/nginx.conf'
 
 	log 'configuring nginx ...'
 	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
@@ -384,12 +435,13 @@ setup_container() {
 	cat > "/etc/nginx/http.d/$HOSTNAME.$DOMAIN.conf" <<-EOF
 		upstream php-handler {
 		    #server 127.0.0.1:9000;
-				server unix:/var/run/php-fpm7/php-fpm.sock;
+		    server unix:/var/run/php-fpm7/php-fpm.sock;
 		}
 
 		server {
 		    listen 80;
 		    listen [::]:80;
+		    listen unix:/run/nginx/http.sock;
 		    server_name $HOSTNAME.$DOMAIN;
 
 		    # Enforce HTTPS
@@ -399,6 +451,7 @@ setup_container() {
 		server {
 		    listen 443      ssl http2;
 		    listen [::]:443 ssl http2;
+		    listen unix:/run/nginx/https.sock ssl http2 proxy_protocol;
 		    server_name $HOSTNAME.$DOMAIN;
 
 		    # Use Mozilla's guidelines for SSL/TLS settings
@@ -504,6 +557,8 @@ setup_container() {
 		        try_files \$fastcgi_script_name =404;
 
 		        include fastcgi_params;
+		        fastcgi_param REMOTE_ADDR \$proxy_protocol_addr;
+		        fastcgi_param REMOTE_PORT \$proxy_protocol_port;
 		        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
 		        fastcgi_param PATH_INFO \$path_info;
 		        fastcgi_param HTTPS on;
@@ -541,12 +596,20 @@ setup_container() {
 
 	log 'configuring php7 ...'
 	cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
-	sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
-	sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
-	sed -i '/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' '/etc/php7/php-fpm.d/www.conf'
-	sed -i '/^;listen\.owner =/ s/.*/listen.owner = nginx/' '/etc/php7/php-fpm.d/www.conf'
-	sed -i '/^;listen\.group =/ s/.*/listen.group = www-data/' '/etc/php7/php-fpm.d/www.conf'
-	sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
+	alter_config '/etc/php7/php-fpm.d/www.conf' \
+		'/^user =/ s/.*/user = nginx/' \
+		'/^group =/ s/.*/group = www-data/' \
+		'/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' \
+		'/^;listen\.owner =/ s/.*/listen.owner = nginx/' \
+		'/^;listen\.group =/ s/.*/listen.group = www-data/' \
+		's/^;env/env/' \
+		# '/^;chroot =/ s/.*/chroot = \/usr\/share\/webapps\/nextcloud/'
+	# sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
+	# sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
+	# sed -i '/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' '/etc/php7/php-fpm.d/www.conf'
+	# sed -i '/^;listen\.owner =/ s/.*/listen.owner = nginx/' '/etc/php7/php-fpm.d/www.conf'
+	# sed -i '/^;listen\.group =/ s/.*/listen.group = www-data/' '/etc/php7/php-fpm.d/www.conf'
+	# sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
 
 	log 'enabling nginx and php7 ...'
 	rc-update add nginx default
@@ -597,7 +660,6 @@ setup_container() {
 	rc-update add freshclam default
 
 	log 'downloading clamav database ...'
-	# freshclam --show-progress --foreground --on-update-execute=EXIT_0
 	freshclam --show-progress --foreground
 
 	log 'installing and enabling "files_antivirus" nextcloud app ...'
@@ -605,6 +667,7 @@ setup_container() {
 
 	log 'installing nextcloud apps ...'
 	for app in $APPS; do
+		log "installing $app ..."
 		if [ "$app" = "richdocumentscode" ] && [ "$(arch)" = 'aarch64' ]; then
 			occ app:install 'richdocumentscode_arm64'
 		else
@@ -623,7 +686,9 @@ setup_container() {
 	log 'configuring redis ...'
 	cp '/etc/redis.conf' '/etc/redis.conf.orig'
 	# do not listen on tcp (only listen on local socket)
-	sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
+	alter_config '/etc/redis.conf' \
+		'/^port / s/.*/port 0/'
+	# sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
 	# add nginx user to redis group
 	adduser nginx redis
 
@@ -648,8 +713,11 @@ setup_container() {
 
 	log 'configuring php redis session management ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
-	sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
-	sed -i '/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/' '/etc/php7/php.ini'
+	alter_config '/etc/php7/php.ini' \
+		'/^session\.save_handler =/ s/.*/session.save_handler = redis/' \
+		'/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/'
+	# sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
+	# sed -i '/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/' '/etc/php7/php.ini'
 
 	cat >> '/etc/php7/php.ini' <<-EOF
 		[redis session management]
@@ -665,6 +733,7 @@ setup_container() {
 	EOF
 
 	# it is okay to stop the database now
+	log 'stopping postgresql database ...'
 	su postgres -c 'pg_ctl stop --mode=smart'
 
 	log 'finished installing nextcloud'
