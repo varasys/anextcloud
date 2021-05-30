@@ -48,6 +48,12 @@ alter_config() { # convenience function to run `sed` inplace with multiple expre
 setup_host() {
 	# this function is run in the host
 
+	# check whether the user is trying to get help (with -h or --help)
+	if [ $# -gt 0 ] && echo "$1" | grep -qe '^-\?-h'; then
+		printf "\nusage: $(basename $0) [config_file]\n\n"
+		exit 1
+	fi
+
 	# restart as root if not root already
 	if [ "$(id -u)" -ne "0" ]; then
 		warn 'restarting as root ...'
@@ -55,7 +61,10 @@ setup_host() {
 	fi
 
 	# work out where to get config input from
-	if [ -n "$CONF" ]; then
+	if [ $# -gt 0 ]; then
+		CONF="$1"
+		shift
+	elif [ -n "$CONF" ]; then
 		log 'using configuration file at: %s' "$CONF"
 	elif [ -f "./conf.env" ]; then
 		log 'using configuration file at: %s' './conf.env'
@@ -406,14 +415,14 @@ setup_container() {
 
 	log 'creating wrapper script utility to view nextcloud log ...'
 	apk add jq # use jq to format the json log
-	cat > '/usr/local/sbin/nclog' <<-'EOF'
+	cat > '/usr/local/bin/nclog' <<-'EOF'
 	#!/usr/bin/env sh
 	set -eu
 
 	tail -f '/var/www/nextcloud/data/nextcloud.log' | jq
 	EOF
-	chmod +x '/usr/local/sbin/nclog'
-	ln -s '/usr/local/sbin/nclog' '/root/nclog'
+	chmod +x '/usr/local/bin/nclog'
+	ln -s '/usr/local/bin/nclog' '/root/nclog'
 
 	log 'increasing upload file size ...'
 	cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
@@ -421,21 +430,16 @@ setup_container() {
 		'/^memory_limit =/ s/.*/memory_limit = 1G/' \
 		'/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' \
 		'/^post_max_size =/ s/.*/post_max_size = 16G/'
-	# sed -i '/^memory_limit =/ s/.*/memory_limit = 1G/' "/etc/php7/php.ini"
-	# sed -i '/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' '/etc/php7/php.ini'
-	# sed -i '/^post_max_size =/ s/.*/post_max_size = 16G/' '/etc/php7/php.ini'
 
 	log 'disabling TLSv1.1 and increasing nginx client max body size ...'
 	cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
 	alter_config '/etc/nginx/nginx.conf' \
 		'/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' \
 		'/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/'
-	# sed -i '/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' '/etc/nginx/nginx.conf'
-	# sed -i '/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/' '/etc/nginx/nginx.conf'
 
 	log 'configuring nginx ...'
 	mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
-	# the following is from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
+	# the following is adapted from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
 	cat > "/etc/nginx/http.d/nextcloud.conf" <<-EOF
 		upstream php-handler {
 		    #server 127.0.0.1:9000;
@@ -462,14 +466,6 @@ setup_container() {
 		    # https://mozilla.github.io/server-side-tls/ssl-config-generator/
 		    ssl_certificate     /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt;
 		    ssl_certificate_key /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key;
-
-		    # HSTS settings
-		    # WARNING: Only add the preload option once you read about
-		    # the consequences in https://hstspreload.org/. This option
-		    # will add the domain to a hardcoded list that is shipped
-		    # in all major browsers and getting removed from this list
-		    # could take several months.
-		    #add_header Strict-Transport-Security "max-age=15768000; includeSubDomains; preload;" always;
 
 		    # set max upload size
 		    client_max_body_size 512M;
@@ -608,12 +604,6 @@ setup_container() {
 		'/^;listen\.owner =/ s/.*/listen.owner = nginx/' \
 		'/^;listen\.group =/ s/.*/listen.group = www-data/' \
 		's/^;env/env/'
-	# sed -i '/^user =/ s/.*/user = nginx/' '/etc/php7/php-fpm.d/www.conf'
-	# sed -i '/^group =/ s/.*/group = www-data/' '/etc/php7/php-fpm.d/www.conf'
-	# sed -i '/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' '/etc/php7/php-fpm.d/www.conf'
-	# sed -i '/^;listen\.owner =/ s/.*/listen.owner = nginx/' '/etc/php7/php-fpm.d/www.conf'
-	# sed -i '/^;listen\.group =/ s/.*/listen.group = www-data/' '/etc/php7/php-fpm.d/www.conf'
-	# sed -i 's/^;env/env/' '/etc/php7/php-fpm.d/www.conf'
 
 	log 'enabling nginx and php7 ...'
 	rc-update add nginx default
@@ -720,8 +710,6 @@ setup_container() {
 	alter_config '/etc/php7/php.ini' \
 		'/^session\.save_handler =/ s/.*/session.save_handler = redis/' \
 		'/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/'
-	# sed -i '/^session\.save_handler =/ s/.*/session.save_handler = redis/' '/etc/php7/php.ini'
-	# sed -i '/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/' '/etc/php7/php.ini'
 
 	cat >> '/etc/php7/php.ini' <<-EOF
 		[redis session management]
@@ -752,6 +740,8 @@ setup_container() {
 	log 'use the wrapper script at '/usr/local/sbin/occ' to run maintenance commands inside the container'
 	log 'use the wrapper script at '/usr/local/sbin/psql' to connect to the nextcloud db inside the container'
 }
+
+
 
 # When the script is run by the user the SCRIPT_ENV environment variable
 # is not set, so the setup_host function will be run. The setup_host
