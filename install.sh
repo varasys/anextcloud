@@ -50,7 +50,7 @@ setup_host() {
 
 	# check whether the user is trying to get help (with -h or --help)
 	if [ $# -gt 0 ] && echo "$1" | grep -qe '^-\?-h'; then
-		printf "\nusage: $(basename $0) [config_file]\n\n"
+		printf "\nusage: %s [config_file]\n\n" "$(basename "$0")"
 		exit 1
 	fi
 
@@ -169,8 +169,6 @@ setup_host() {
 		$MIRROR/$VERSION/main
 		$MIRROR/$VERSION/community
 	EOF
-	# echo "$MIRROR/$VERSION/main" > "$TARGET/etc/apk/repositories"
-	# echo "$MIRROR/$VERSION/community" >> "$TARGET/etc/apk/repositories"
 
 	log 'configuring container networking ...'
 	cat > "$TARGET/etc/network/interfaces" <<-EOF
@@ -189,7 +187,6 @@ setup_host() {
 	log 'enabling console ...'
 	alter_config "$TARGET/etc/inittab" \
 		'/tty[0-9]:/ s/^/#/'
-	# sed -i '/tty[0-9]:/ s/^/#/' "$TARGET/etc/inittab"
 	echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
 
 	log 'setting hostname ...'
@@ -223,7 +220,7 @@ setup_container() {
 	log 'configuring container ...'
 
 	mkdir -p '/usr/local/sbin'
-	# alias to use the cache directory which which is bind mounted into the container
+	# alias to use the cache directory which is bind mounted into the container
 	alias apk='apk --cache-dir=/tmp/cache/apk'
 
 	log 'installing neovim (for debugging when needed) ...'
@@ -253,12 +250,10 @@ setup_container() {
 	echo "data_dir=\"$PGDATA\"" >> "/etc/conf.d/postgresql"
 	alter_config '/etc/conf.d/postgresql' \
 		'/^conf_dir/ s/^/#/'
-	# sed -i '/^conf_dir/ s/^/#/' "/etc/conf.d/postgresql"
 	
 	log 'initializing postgresql cluster ...'
 	su postgres -c initdb
 
-	# create wrapper script to run `psql` command as nextcloud user
 	log 'creating wrapper script at "/usr/local/sbin/psql" ...'
 	cat > '/usr/local/sbin/psql' <<-'EOF'
 		#!/usr/bin/env sh
@@ -682,11 +677,9 @@ setup_container() {
 	# do not listen on tcp (only listen on local socket)
 	alter_config '/etc/redis.conf' \
 		'/^port / s/.*/port 0/'
-	# sed -i '/^port / s/.*/port 0/' '/etc/redis.conf'
-	# add nginx user to redis group
 	adduser nginx redis
 
-	log 'configuring nextcloud redis caching ...'
+	log 'configuring nextcloud domain names and redis caching ...'
 	occ config:import <<-EOF
 		{
 		    "system": {
