@@ -6,6 +6,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 # 2) it pipes itself into the container, and then runs within the container to finish the configuration
 
 # TODO install certbot (use env variable to know whether to run?)
+# TODO update motd
 # TODO run cronjob to update lets encrypt cert
 # TODO enable cron https://docs.nextcloud.com/server/latest/admin_manual/configuration_server/background_jobs_configuration.html
 # TODO setup haproxy https://www.haproxy.com/blog/enhanced-ssl-load-balancing-with-server-name-indication-sni-tls-extension/
@@ -401,6 +402,29 @@ setup_container() {
 		php7-xmlwriter \
 		php7-zip
 
+	# log 'creating self signed certificate ...'
+	# apk add openssl
+	# mkdir -p '/etc/ssl/nginx'
+	# openssl req -x509 \
+	# 	-nodes \
+	# 	-days 365 \
+	# 	-newkey rsa:4096 \
+	# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
+	# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
+	# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
+
+	log 'installing certbot ...'
+	apk add certbot certbot-nginx
+
+	log 'requesting letsencrypt certificate ...'
+	# certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive \
+	# 	--webroot --webroot-path='/usr/share/webapps/letsencrypt/'
+	# certbot certonly --standalone --preferred-challenges http -d "$HOSTNAME.$DOMAIN" \
+	# 	-m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive
+	# ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
+	# ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
+	certbot -d "$HOSTNAME.$DOMAIN" --nginx --agree-tos --non-interactive -m "admin@$HOSTNAME.$DOMAIN"
+
 	log 'creating data directory ...'
 	mkdir -p '/var/www/nextcloud/data'
 
@@ -611,26 +635,6 @@ setup_container() {
 	log 'enabling nginx and php7 ...'
 	rc-update add nginx default
 	rc-update add php-fpm7 default
-
-	# log 'creating self signed certificate ...'
-	# apk add openssl
-	# mkdir -p '/etc/ssl/nginx'
-	# openssl req -x509 \
-	# 	-nodes \
-	# 	-days 365 \
-	# 	-newkey rsa:4096 \
-	# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
-	# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
-	# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
-
-	log 'installing certbot ...'
-	apk add certbot
-
-	log 'requesting letsencrypt certificate ...'
-	certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" \
-		--webroot --webroot-path='/usr/share/webapps/letsencrypt/'
-	ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
-	ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
 
 	log 'generating admin password ...'
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
