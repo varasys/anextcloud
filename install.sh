@@ -404,9 +404,13 @@ setup_container() {
 	log 'creating data directory ...'
 	mkdir -p '/var/www/nextcloud/data'
 
+	log 'creating letsencrypt directory ...'
+	mkdir -p '/usr/share/webapps/letsencrypt'
+
 	log 'updating directory ownership ...'
 	chown -R nginx:www-data '/var/www/nextcloud'
 	chown -R nginx:www-data '/usr/share/webapps/nextcloud'
+	chown -R nginx:www-data '/usr/share/webapps/letsencrypt'
 
 	log 'creating wrapper script utility to view nextcloud log ...'
 	apk add jq # use jq to format the json log
@@ -444,11 +448,15 @@ setup_container() {
 		server {
 		    listen 80;
 		    listen [::]:80;
-		    listen unix:/run/nginx/http.sock;
+		    listen unix:/run/nginx/http.sock proxy_protocol;
 		    server_name $HOSTNAME.$DOMAIN;
-
-		    # Enforce HTTPS
-		    return 301 https://\$server_name\$request_uri;
+		    location '/.well-known/acme-challenge' {
+		        default_type "text/plain";
+		        root /usr/share/webapps/letsencrypt;
+		    }
+		    location / {
+		        return 301 https://\$server_name\$request_uri;
+		    }
 		}
 
 		server {
@@ -604,16 +612,25 @@ setup_container() {
 	rc-update add nginx default
 	rc-update add php-fpm7 default
 
-	log 'creating self signed certificate ...'
-	apk add openssl
-	mkdir -p '/etc/ssl/nginx'
-	openssl req -x509 \
-		-nodes \
-		-days 365 \
-		-newkey rsa:4096 \
-		-subj "/CN=$HOSTNAME.$DOMAIN" \
-		-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
-		-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
+	# log 'creating self signed certificate ...'
+	# apk add openssl
+	# mkdir -p '/etc/ssl/nginx'
+	# openssl req -x509 \
+	# 	-nodes \
+	# 	-days 365 \
+	# 	-newkey rsa:4096 \
+	# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
+	# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
+	# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
+
+	log 'installing certbot ...'
+	apk add certbot
+
+	log 'requesting letsencrypt certificate ...'
+	certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" \
+		--webroot --webroot-path='/usr/share/webapps/letsencrypt/'
+	ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
+	ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
 
 	log 'generating admin password ...'
 	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
