@@ -1,4 +1,0 @@
-#!/usr/bin/env sh
-set -eu
-
-echo "$*" | socat stdio "${SOCKET:='/run/haproxy/admin.sock'}"

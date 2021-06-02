@@ -109,5 +109,10 @@ cat <<-EOF
 	configuration file. To start haproxy pass the \`-f $ROOT\` command
 	line argument so all of the files in the configuration directory
 	will be used (in lexical order).
+
+	Run \`systemctl restart haproxy.service\` to restart haproxy or
+	\`systemctl enable --now haproxy.service\` to start haproxy, and autostart
+	at boot.
+
 	$(printf '%b' "$NC")
 EOF
