@@ -9,23 +9,24 @@ set -eu
 # for containers running systemd (in the container), the
 # `machinectl shell ...` and `machinectl login ...`
 # commands can be used instead, but this script is for
-# containers that aren't running systemd
+# containers that aren't running systemd in the container
 
 # Leader is the systemd-nspawn term for the main process
 # of a systemd-nspawn container
 
 if [ "$#" -eq 0 ]; then
 	printf "error: missing arguments\n" >&2
-	echo "usage: $0 machine [args]\n" >&2
+	printf "usage: %s machine [args ...]\n\n" "$0" >&2
 	exit 1
 fi
 
 LEADER=$(machinectl show --property=Leader "$1")
+PID="${LEADER##Leader=}"
+printf "entering namespace for %s (PID %s) ...\n" "$1" "$PID" >&2
 shift
-printf "entering namespace for %s ...\n" "$LEADER" >&2
 
 if [ "$#" -eq 0 ]; then
 	set -- /bin/sh -l
 fi
 
-exec nsenter -a -t "${LEADER##Leader=}" "$@"
+exec nsenter -a -t "$PID" "$@"
