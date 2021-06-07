@@ -1,5 +1,5 @@
 #!/usr/bin/env sh
-set -eu
+set -e
 
 # define colors - change to empty strings if you don't want colors
 NC='\e[0m'
@@ -78,6 +78,15 @@ if [ ! -f "$ROOT/10-haproxy.cfg" ]; then
 	EOF
 else
 	log "'$ROOT/10-haproxy.cfg' file already exists"
+fi
+
+if [ $# -eq 0 ]; then
+	log 'using system FQDN'
+	HOSTNAME="$(hostname -s)"
+	DOMAIN="$(hostname -d)"
+	[ -z "$HOSTNAME" ] && { log 'error: invalid/missing hostname'; exit 1; }
+	[ -z "$DOMAIN" ] && { log 'error: invalid/missing domain'; exit 1; }
+	set "$HOSTNAME.$DOMAIN"
 fi
 
 for site in "$@"; do
