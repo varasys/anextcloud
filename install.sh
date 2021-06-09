@@ -20,19 +20,19 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 	log() {
 		msg=$1; shift
-		printf "%b$msg%b\n" "$BLUE" "$@" "$NC" >&2
+		printf "\n%b$msg%b\n" "$BLUE" "$@" "$NC" >&2
 	}
 	warn() {
 		msg=$1; shift
-		printf "%b$msg%b\n" "$YELLOW" "$@" "$NC" >&2
+		printf "\n%b$msg%b\n" "$YELLOW" "$@" "$NC" >&2
 	}
 	error() {
 		msg=$1; shift
-		printf "%b$msg%b\n" "$RED" "$@" "$NC" >&2
+		printf "\n%b$msg%b\n" "$RED" "$@" "$NC" >&2
 	}
 	prompt() { # does not include newline (so user input is on the same line)
 		msg=$1; shift
-		printf "%b$msg%b" "$PURPLE" "$@" "$NC" >&2
+		printf "\n%b$msg%b" "$PURPLE" "$@" "$NC" >&2
 		IFS= read -r var
 		printf "%s" "$var"
 	}
@@ -47,7 +47,7 @@ update_file() { # convenience function to run `sed` inplace with multiple expres
 }
 
 is_container() {
-	xargs -0 -n 1 -a /proc/1/environ 2>/dev/null | grep -q 'container=systemd-nspawn'
+	tr '\0' '\n' < '/proc/1/environ' | grep -q 'container=systemd-nspawn'
 }
 
 load_config() { # work out where to get config from and source config file if it exists
@@ -64,6 +64,8 @@ load_config() { # work out where to get config from and source config file if it
 
 print_host_config() { # variables used to setup a host environment
 	cat <<-EOF
+		# Systemd Host Config
+
 		# server hostname
 		HOSTNAME='${HOSTNAME:="$(hostname -s)"}'
 		# server domain
@@ -76,11 +78,23 @@ print_host_config() { # variables used to setup a host environment
 		VERSION='${VERSION:="latest-stable"}'
 		# host network interface (for MACVLAN)
 		NET_IFACE='${NET_IFACE:="eth0"}'
+		# cache dir
+		CACHE_DIR='${CACHE_DIR="./cache"}'
+		# apk cache dir
+		APK_CACHE_DIR='${APK_CACHE_DIR="${CACHE_DIR+"$CACHE_DIR/apk"}"}'
+		# nextcloud cache dir
+		NEXTCLOUD_CACHE_DIR='${NEXTCLOUD_CACHE_DIR="${CACHE_DIR+"$CACHE_DIR/nextcloud"}"}'
+		# use cached version of apk-tools to bootstrap alpine linux (name of apk-tools-static-xxx.apk file in the cache directory)
+		APKTOOLS='${APKTOOLS}'
+
+
 	EOF
 }
 
 print_alpine_config() { # variables used to setup Alpine Linux
 	cat <<-EOF
+		# Alpine Linux Config
+
 		# fully qualified domain name
 		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
 		# nextcloud version
@@ -89,6 +103,10 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/latest-${NEXTCLOUD_VER}.tar.bz2"}'
 		# nextcloud signature download url
 		NEXTCLOUD_SIG='${NEXTCLOUD_SIG:="${NEXTCLOUD_URL}.asc"}'
+		# nextcloud app dir prefix
+		APP_DIR_PREFIX="${APP_DIR_PREFIX:="/usr/local/share"}"
+		# nextcloud data dir
+		DATA_DIR_PREFIX="${DATA_DIR_PREFIX:="/var/lib"}"
 		# LetsEncrypt contact email (leave blank to skip requesting letsencrypt cert)
 		LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL="admin@$FQDN"}"
 		# apps to install
@@ -103,7 +121,8 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		  twofactor_totp
 		  spreed
 		  drawio
-		  files_mindmapkeeweb
+		  files_mindmap
+			keeweb
 		"}'
 	EOF
 }
@@ -113,6 +132,7 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 		shift
 		load_config "$@"
 		print_host_config
+		print_alpine_config
 		exit 0
 	fi
 
@@ -144,16 +164,22 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 	}
 
 	{
-		log 'downloading apk tools ...'
-
 		apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
 		trap 'rm -rf "$apkdir"' EXIT
 
-		APKTOOLS="$(curl -s -fL "$MIRROR/$VERSION/main/$(arch)" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"
-		log "using: $MIRROR/$VERSION/main/$(arch)/$APKTOOLS"
-
-		log 'downloading alpine linux apk-tools ...'
-		curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tar -xz -C "$apkdir"
+		APKTOOLS="${APKTOOLS:="$(curl -s -fL "$MIRROR/$VERSION/main/$(arch)" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"}"
+		log 'installing Alpine Linux using: "%s" ...' "$APKTOOLS"
+		if [ -n "$APK_CACHE_DIR" ] && [ -f "$APK_CACHE_DIR/$APKTOOLS" ]; then
+			log 'extracting cached apk-tools ...'
+			tar -xzf "$APK_CACHE_DIR/$APKTOOLS" -C "$apkdir"
+		else
+			log 'downloading apk-tools from "%s" ...' "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS"
+			if [ -n "$APK_CACHE_DIR" ]; then
+				curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tee "$APK_CACHE_DIR/$APKTOOLS" | tar -xz -C "$apkdir"
+			else
+				curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tar -xz -C "$apkdir"
+			fi
+		fi
 
 		log 'installing alpine linux key ...'
 		mkdir -p "$apkdir/keys"
@@ -168,12 +194,13 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 			aQIDAQAB
 			-----END PUBLIC KEY-----
 		EOF
-	}
 
-	{
 		log 'installing alpine linux to: %s ...' "$TARGET"
 
-		mkdir -p "$(pwd)/cache/apk"
+		if [ -n "$APK_CACHE_DIR" ]; then
+			mkdir -p "$APK_CACHE_DIR" "$TARGET/etc/apk"
+			ln -s "$(cd "$APK_CACHE_DIR"; pwd)" "$TARGET/etc/apk/cache"
+		fi
 		"$apkdir/sbin/apk.static" \
 			--keys-dir "$apkdir/keys" \
 			--verbose \
@@ -181,24 +208,26 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 			--root "$TARGET" \
 			--initdb \
 			--repository "$MIRROR/$VERSION/main" \
-			--cache-dir "$(pwd)/cache/apk" \
 			add alpine-base
+		[ -h "$TARGET/etc/apk/cache" ] && rm "$TARGET/etc/apk/cache" # remove apk cache symlink
 	}
 
-	log 'creating systemd-nspawn settings file ...'
-	mkdir -p "/etc/systemd/nspawn"
-	cat > "/etc/systemd/nspawn/$(basename "$TARGET").nspawn" <<-EOF
-		[Exec]
-		PrivateUsers=false
+	{
+		log 'creating systemd-nspawn settings file ...'
+		mkdir -p "/etc/systemd/nspawn"
+		cat > "/etc/systemd/nspawn/$(basename "$TARGET").nspawn" <<-EOF
+			[Exec]
+			PrivateUsers=false
 
-		[Network]
-		VirtualEthernet=no
-		MACVLAN=$NET_IFACE
+			[Network]
+			VirtualEthernet=no
+			MACVLAN=$NET_IFACE
 
-		[Files]
-		Bind=/var/lib/haproxy/$HOSTNAME.$DOMAIN:/run/nginx
-	EOF
-	mkdir -p "/var/lib/haproxy/$HOSTNAME.$DOMAIN"
+			[Files]
+			Bind=/var/lib/haproxy/$HOSTNAME.$DOMAIN:/run/nginx
+		EOF
+		mkdir -p "/var/lib/haproxy/$HOSTNAME.$DOMAIN"
+	}
 
 	{
 		log 'configuring alpine linux repositories ...'
@@ -229,6 +258,14 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 		log 'setting hostname ...'
 		echo "$HOSTNAME" > "$TARGET/etc/hostname"
 		echo "127.0.1.1	$HOSTNAME.$DOMAIN $HOSTNAME" >> "$TARGET/etc/hosts"
+
+		log 'enabling system services ...'
+		for service in networking bootmisc hostname syslog; do
+			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/boot/$service"
+		done
+		for service in killprocs savecache; do
+			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/shutdown/$service"
+		done
 	}
 
 	{
@@ -237,15 +274,18 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 		cp "$0" "$TARGET/root/nextcloud/install.sh"
 		print_host_config > "$TARGET/root/nextcloud/nextcloud.conf"
 		print_alpine_config >> "$TARGET/root/nextcloud/nextcloud.conf"
-		
+
+		[ -n "$APK_CACHE_DIR" ] && mkdir -p "$APK_CACHE_DIR"
+		[ -n "$NEXTCLOUD_CACHE_DIR" ] && mkdir -p "$NEXTCLOUD_CACHE_DIR"
 
 		log 'spawning container ...'
 		systemd-nspawn \
 			--directory="$TARGET" \
 			--settings=false \
 			--console=pipe \
-			--bind="$(pwd)/cache:/tmp/cache" \
-			sh '/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
+			${APK_CACHE_DIR:+--bind="$(cd "$APK_CACHE_DIR"; pwd):/etc/apk/cache"} \
+			${NEXTCLOUD_CACHE_DIR:+--bind="$(cd "$NEXTCLOUD_CACHE_DIR"; pwd):/tmp/cache/nextcloud"} \
+			'/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
 	}
 }
 
@@ -257,35 +297,34 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		exit 0
 	fi
 
+	if [ "$(id -u)" -ne "0" ]; then
+		warn 'restarting as root ...'
+		exec "$0" "$@"
+	fi
+
 	load_config "$@"
 	print_alpine_config
 	mkdir -p '/usr/local/sbin' '/usr/local/bin' # ensure directories for utility scripts exist
 
-	if is_container; then
-		mkdir -p '/tmp/cache/apk' # ensure the cache directory exists (should already be bind mounted from the host)
-		alias apk='apk --cache-dir=/tmp/cache/apk' # alias the apk command to use the cache directory on the host
-	fi
+	# log 'creating nextcloud system user ...'
+	# adduser -HDS nextcloud
 
-	log 'enabling system services ...'
-	rc-update add networking boot
-	rc-update add bootmisc boot
-	rc-update add hostname boot
-	rc-update add syslog boot
-	rc-update add killprocs shutdown
-	rc-update add savecache shutdown
-
-	log 'creating nextcloud system user ...'
-	adduser -HDS nextcloud
+	log 'creating data directory ...'
+	mkdir -p "$DATA_DIR_PREFIX/nextcloud"
+	mkdir -p "$APP_DIR_PREFIX/nextcloud"
 
 	{ # install postgresql
 		log 'installing postgresql ...'
 		apk add postgresql postgresql-contrib postgresql-openrc
+		rc-update add postgresql default
 
 		log 'configuring postgresql ...'
 		export PGDATA='/var/lib/postgresql/data'
-		echo "data_dir=\"$PGDATA\"" >> "/etc/conf.d/postgresql"
-		update_file '/etc/conf.d/postgresql' \
-			'/^conf_dir/ s/^/#/'
+		mv '/etc/conf.d/postgresql' '/etc/conf.d/postgresql.orig'
+		cat > '/etc/conf.d/postgresql' <<-EOF
+			data_dir="$PGDATA"
+			logfile="/var/log/postgresql/postmaster.log"
+		EOF
 
 		log 'creating postgresql wrapper scripts (to run pg utilities as postgres user) ...'
 		cat > '/usr/local/sbin/postgres' <<-'EOF'
@@ -296,12 +335,19 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		chmod +x '/usr/local/sbin/postgres'
 		(cd '/usr/bin'; find . -name 'pg_*' -exec ln -s './postgres' '/usr/local/sbin/{}' ';')
 		ln -s './postgres' '/usr/local/sbin/psql'
+		ln -s './postgres' '/usr/local/sbin/initdb'
 
 		log 'initializing postgresql cluster ...'
-		pg_ctl initdb -o "--data-checksums"
+		initdb --data-checksums
+
+		log 'disabling postgresql TCP access ...'
+		update_file "$PGDATA/postgresql.conf" \
+			"/^#\?listen_addresses = / s/.*/listen_addresses = ''/"
 
 		log 'starting postgresql database ...'
-		pg_ctl start -o '-k/tmp'
+		mkdir '/run/postgresql'
+		chown postgres '/run/postgresql'
+		pg_ctl start
 
 		log 'creating nextcloud database ...'
 		psql <<-EOF
@@ -311,9 +357,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			GRANT ALL PRIVILEGES ON DATABASE nextcloud TO nextcloud;
 		EOF
 		# don't stop the database, it needs to be running for later steps
-
-		log 'enabling postgresql database ...'
-		rc-update add postgresql default
 	}
 
 	{ # install nginx and php7-fpm
@@ -339,6 +382,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			php7-pdo_pgsql \
 			php7-pecl-imagick \
 			php7-pgsql \
+			php7-pcntl \
 			php7-posix \
 			php7-session \
 			php7-simplexml \
@@ -346,40 +390,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			php7-xmlreader \
 			php7-xmlwriter \
 			php7-zip
-
-		# log 'creating self signed certificate ...'
-		# apk add openssl
-		# mkdir -p '/etc/ssl/nginx'
-		# openssl req -x509 \
-		# 	-nodes \
-		# 	-days 365 \
-		# 	-newkey rsa:4096 \
-		# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
-		# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
-		# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
-
-		log 'installing certbot ...'
-		apk add certbot certbot-nginx
-
-		log 'requesting letsencrypt certificate ...'
-		# certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive \
-		# 	--webroot --webroot-path='/usr/share/webapps/letsencrypt/'
-		# certbot certonly --standalone --preferred-challenges http -d "$HOSTNAME.$DOMAIN" \
-		# 	-m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive
-		# ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
-		# ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
-		certbot -d "$HOSTNAME.$DOMAIN" --nginx --agree-tos --non-interactive -m "admin@$HOSTNAME.$DOMAIN"
-
-		log 'creating data directory ...'
-		mkdir -p '/var/www/nextcloud/data'
-
-		log 'creating letsencrypt directory ...'
-		mkdir -p '/usr/share/webapps/letsencrypt'
-
-		log 'updating directory ownership ...'
-		chown -R nginx:www-data '/var/www/nextcloud'
-		chown -R nginx:www-data '/usr/share/webapps/nextcloud'
-		chown -R nginx:www-data '/usr/share/webapps/letsencrypt'
 
 		log 'increasing upload file size ...'
 		cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
@@ -410,7 +420,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 					server_name $HOSTNAME.$DOMAIN;
 					location '/.well-known/acme-challenge' {
 							default_type "text/plain";
-							root /usr/share/webapps/letsencrypt;
+							root $APP_DIR_PREFIX/webapps/letsencrypt;
 					}
 					location / {
 							return 301 https://\$server_name\$request_uri;
@@ -457,7 +467,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 					fastcgi_hide_header X-Powered-By;
 
 					# Path to the root of your installation
-					root /usr/share/webapps/nextcloud;
+					root $APP_DIR_PREFIX/nextcloud;
 
 					# Specify how to handle directories -- specifying \`/index.php\$request_uri\`
 					# here as the fallback means that Nginx always exhibits the desired behaviour
@@ -630,53 +640,68 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			=ykUA
 			-----END PGP PUBLIC KEY BLOCK-----
 		EOF
+		log 'setting ultimate trust on nextcloud gpg key ...'
+		echo '28806A878AE423A28372792ED75899B9A724937A:6:' | gpg --import-ownertrust
 
-		log 'downloading nextcloud tarball and signature ...'
 		mkdir -p '/tmp/cache/nextcloud'
-		cd '/tmp/cache/nextcloud'
-		[ -f "$(basename "$NEXTCLOUD_URL")" ] || curl -fLO "$NEXTCLOUD_URL"
-		[ -f "$(basename "$NEXTCLOUD_SIG")" ] || curl -fLO "$NEXTCLOUD_SIG"
+		if [ ! -f "/tmp/cache/nextcloud/$(basename "$NEXTCLOUD_URL")" ]; then
+			log 'downloading nextcloud tarball ...'
+			curl -fLO "$NEXTCLOUD_URL" --output-dir '/tmp/cache/nextcloud'
+		fi
+		if [ ! -f "/tmp/cache/nextcloud/$(basename "$NEXTCLOUD_SIG")" ]; then
+			log 'downloading nextcloud signature ...'
+			curl -fLO "$NEXTCLOUD_SIG" --output-dir '/tmp/cache/nextcloud'
+		fi
 
 		log 'verifying nextcloud tarball ...'
-		gpg --verify "./$(basename "$NEXTCLOUD_SIG")" "./$(basename "$NEXTCLOUD_URL")"
+		gpg --verify "/tmp/cache/nextcloud/$(basename "$NEXTCLOUD_SIG")" "/tmp/cache/nextcloud/$(basename "$NEXTCLOUD_URL")"
 		
 		log 'extracting nextcloud tarball ...'
-		mkdir -p '/usr/share/webapps'
-		tar -jxf "./$(basename "$NEXTCLOUD_URL")" -C '/usr/share/webapps'
+		tar -jxf "/tmp/cache/nextcloud/$(basename "$NEXTCLOUD_URL")" -C "$APP_DIR_PREFIX"
+
+		log 'updating directory ownership ...'
+		chown -R nginx:www-data "$DATA_DIR_PREFIX/nextcloud"
+		chown -R nginx:www-data "$APP_DIR_PREFIX/nextcloud"
+
+		log 'creating wrapper script at "/usr/local/sbin/occ" ...'
+		cat > "/usr/local/sbin/occ" <<-EOF
+			#!/bin/sh -eu
+			CMD="/usr/bin/php '$APP_DIR_PREFIX/nextcloud/occ' \$@"
+			su -s /bin/sh nginx -c "\$CMD"
+		EOF
+		chmod +x '/usr/local/sbin/occ'
+
+		log 'generating admin password ...'
+		ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
+		echo "$ADMIN_PASS" > "/root/nextcloud_password"
+
+		log 'performing initial nextcloud configuration - this may take some time ...'
+		occ maintenance:install \
+			--database 'pgsql' \
+			--database-host '/run/postgresql' \
+			--database-name 'nextcloud' \
+			--database-user 'nextcloud' \
+			--database-pass '' \
+			--admin-user 'admin' \
+			--admin-pass "$ADMIN_PASS" \
+			--data-dir "$DATA_DIR_PREFIX/nextcloud"
+
+		log 'configuring trusted_domains ...'
+		occ config:import <<-EOF
+			{
+			  "system": {
+			    "trusted_domains": [
+			      "localhost",
+			      "$FQDN"
+			    ]
+			  }
+			}
+		EOF
 	}
-
-
-	log 'generating admin password ...'
-	ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"
-	echo "$ADMIN_PASS" > "/root/nextcloud_password"
-
-	# create wrapper script to run `occ` command as nginx user
-	log 'creating wrapper script at "/usr/local/sbin/occ" ...'
-	cat > "/usr/local/sbin/occ" <<-'EOF'
-		#!/usr/bin/env sh
-		set -eu
-
-		printf "running occ utility as user: nginx\n" >&2
-		CMD="/usr/bin/php /usr/share/webapps/nextcloud/occ $@"
-		su -s /bin/sh nginx -c "$CMD"
-	EOF
-	chmod +x '/usr/local/sbin/occ'
-
-	log 'performing initial nextcloud configuration - this may take some time ...'
-	occ maintenance:install \
-		--database 'pgsql' \
-		--database-name 'nextcloud' \
-		--database-user 'nextcloud' \
-		--database-pass '' \
-		--admin-user 'admin' \
-		--admin-pass "$ADMIN_PASS" \
-		--data-dir '/var/www/nextcloud/data'
 
 	{ # install clamav antivirus
 		log 'installing clamav antivirus ...'
 		apk add clamav clamav-libunrar
-
-		log 'enabling clamav and freshclam ...'
 		rc-update add clamd default
 		rc-update add freshclam default
 
@@ -685,10 +710,12 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 		log 'installing and enabling "files_antivirus" nextcloud app ...'
 		occ app:install 'files_antivirus'
+	}
 
+	{ # install nextcloud apps
 		log 'installing nextcloud apps ...'
 		for app in $APPS; do
-			log "installing $app ..."
+			log 'installing "%s" ...' "$app"
 			if [ "$app" = "richdocumentscode" ] && [ "$(arch)" = 'aarch64' ]; then
 				occ app:install 'richdocumentscode_arm64'
 			else
@@ -702,8 +729,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		# need to be running to do any operations with `occ`
 		log 'installing APCu and redis ...'
 		apk add redis php7-pecl-redis redis-openrc php7-pecl-apcu
-		
-		log 'enabling redis ...'
 		rc-update add redis default
 
 		log 'configuring redis ...'
@@ -713,22 +738,18 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			'/^port / s/.*/port 0/'
 		adduser nginx redis
 
-		log 'configuring nextcloud domain names and redis caching ...'
+		log 'configuring redis caching ...'
 		occ config:import <<-EOF
 			{
-					"system": {
-							"trusted_domains": [
-									"localhost",
-									"$HOSTNAME.$DOMAIN"
-							],
-							"memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
-							"memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
-							"memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
-							"redis": {
-									"host": "/run/redis/redis.sock",
-									"port": 0
-							}
-					}
+			  "system": {
+			    "memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
+			    "memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
+			    "memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
+			    "redis": {
+			      "host": "/run/redis/redis.sock",
+			      "port": 0
+			    }
+			  }
 			}
 		EOF
 
@@ -746,15 +767,17 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		EOF
 	}
 
-	log 'configuring cron ...'
-	rc-update add crond default
-	crontab -u nginx - <<-EOF
-		*/5  *  *  *  * php -f /usr/share/webapps/nextcloud/cron.php
-	EOF
+	{ # configure cron
+		log 'configuring cron ...'
+		rc-update add crond default
+		crontab -u nginx - <<-EOF
+			*/5  *  *  *  * php -f $APP_DIR_PREFIX/nextcloud/cron.php
+		EOF
+	}
 
 	# it is okay to stop the database now
 	log 'stopping postgresql database ...'
-	su postgres -c 'pg_ctl stop --mode=smart'
+	pg_ctl stop --mode=smart
 
 	log 'finished installing nextcloud'
 	warn "\nnextcloud admin user: 'admin'"
@@ -786,3 +809,37 @@ case "${SCRIPT_ENV:="$(. /etc/os-release; echo "$ID")"}" in
 		prepare_container "$@"
 		;;
 esac
+
+
+
+
+
+
+
+
+
+
+
+		# log 'creating self signed certificate ...'
+		# apk add openssl
+		# mkdir -p '/etc/ssl/nginx'
+		# openssl req -x509 \
+		# 	-nodes \
+		# 	-days 365 \
+		# 	-newkey rsa:4096 \
+		# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
+		# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
+		# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
+
+		# log 'installing certbot ...'
+		# apk add certbot certbot-nginx
+
+		# log 'requesting letsencrypt certificate ...'
+		# # certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive \
+		# # 	--webroot --webroot-path="$APP_DIR/webapps/letsencrypt/"
+		# # certbot certonly --standalone --preferred-challenges http -d "$HOSTNAME.$DOMAIN" \
+		# # 	-m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive
+		# # ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
+		# # ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
+		# certbot -d "$HOSTNAME.$DOMAIN" --nginx --agree-tos --non-interactive -m "admin@$HOSTNAME.$DOMAIN"
+
