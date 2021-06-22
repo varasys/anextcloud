@@ -49,31 +49,31 @@ if [ ! -f "$ROOT/10-haproxy.cfg" ]; then
 	warn "creating '$ROOT/10-haproxy.cfg' file ..."
 	cat > "$ROOT/10-haproxy.cfg" <<-EOF
 		global
-			log stdout format raw local0 info
-			chroot /var/lib/haproxy
-			user haproxy
-			group haproxy
+		    log stdout format raw local0 info
+		    chroot /run/haproxy
+		    user haproxy
+		    group haproxy
 
 		defaults
-			log global
-			timeout connect 30s
-			timeout client  50s
-			timeout server  50s
+		    log global
+		    timeout connect 30s
+		    timeout client  50s
+		    timeout server  50s
 
 		frontend fe_http
-			bind :80
-			mode http
-			option httplog
-			http-request redirect scheme https unless { path_beg /.well-known/acme-challenge }
-			use_backend %[req.hdr(Host),lower]-http
+		    bind :80
+		    mode http
+		    option httplog
+		    http-request redirect scheme https unless { path_beg -i /.well-known/acme-challenge/ }
+		    use_backend %[req.hdr(Host),lower]-http
 
 		frontend fe_https
-			bind :443
-			mode tcp
-			option tcplog
-			tcp-request inspect-delay 5s
-			tcp-request content accept if { req_ssl_hello_type 1 }
-			use_backend %[req_ssl_sni,lower]-https
+		    bind :443
+		    mode tcp
+		    option tcplog
+		    tcp-request inspect-delay 5s
+		    tcp-request content accept if { req_ssl_hello_type 1 }
+		    use_backend %[req_ssl_sni,lower]-https
 
 	EOF
 else
@@ -94,15 +94,15 @@ for site in "$@"; do
 		warn "creating '$ROOT/50-$site.cfg' file ..."
 		cat > "$ROOT/50-$site.cfg" <<-EOF
 			backend $site-http
-			  mode http
-			  option httplog
-			  server server1 /$site/http.sock send-proxy-v2
+			    mode http
+			    option httplog
+			    server server1 /$site/http.sock send-proxy-v2
 
 			backend $site-https
-			  mode tcp
-			  option tcplog
-			  option ssl-hello-chk
-			  server server1 /$site/https.sock send-proxy-v2 check
+			    mode tcp
+			    option tcplog
+			    option ssl-hello-chk
+			    server server1 /$site/https.sock send-proxy-v2 check
 
 		EOF
 	else

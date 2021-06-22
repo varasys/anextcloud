@@ -64,16 +64,14 @@ load_config() { # work out where to get config from and source config file if it
 
 print_host_config() { # variables used to setup a host environment
 	cat <<-EOF
-		# Systemd Host Config
+		# \`systemd-nspawn\` Host Config
 
-		# server hostname
-		HOSTNAME='${HOSTNAME:="$(hostname -s)"}'
-		# server domain
-		DOMAIN='${DOMAIN:="$(hostname -d)"}'
+		# fully qualified domain name
+		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
 		# location of the container rootfs (on the host)
-		TARGET='${TARGET:="/var/lib/machines/$HOSTNAME.$DOMAIN"}'
+		TARGET='${TARGET:="/var/lib/machines/$FQDN"}'
 		# alpine linux distribution mirror location
-		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine/"}'
+		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
 		# alpine linux stream
 		VERSION='${VERSION:="latest-stable"}'
 		# host network interface (for MACVLAN)
@@ -85,8 +83,7 @@ print_host_config() { # variables used to setup a host environment
 		# nextcloud cache dir
 		NEXTCLOUD_CACHE_DIR='${NEXTCLOUD_CACHE_DIR="${CACHE_DIR+"$CACHE_DIR/nextcloud"}"}'
 		# use cached version of apk-tools to bootstrap alpine linux (name of apk-tools-static-xxx.apk file in the cache directory)
-		APKTOOLS='${APKTOOLS}'
-
+		APKTOOLS='${APKTOOLS:=""}'
 
 	EOF
 }
@@ -122,13 +119,14 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		  spreed
 		  drawio
 		  files_mindmap
-			keeweb
+		  keeweb
 		"}'
 	EOF
 }
 
-prepare_container() { # prepare the host by installing alpine linux into the /var/lib/machines directory
+prepare_container() { # prepare the host by installing alpine linux into the $TARGET directory
 	if [ $# -gt 0 ] && echo "$1" | grep -qe '^-\?-c'; then # print config and exit
+		# the line above uses a regex to check if the first argument starts with --c or -c
 		shift
 		load_config "$@"
 		print_host_config
@@ -148,6 +146,14 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 
 	load_config "$@"
 	print_host_config
+	if [ -z "$FQDN" ]; then
+		error 'fatal error: missing FQDN environment variable'
+		exit 1
+	fi
+	if [ -z "${FQDN#*.}" ]; then
+		error 'fatal error: missing domain part of FQDN environment variable'
+		exit 1
+	fi
 
 	{ # create target directory or ensure it is empty
 		if [ ! -d "$TARGET" ]; then
@@ -213,20 +219,32 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 	}
 
 	{
-		log 'creating systemd-nspawn settings file ...'
-		mkdir -p "/etc/systemd/nspawn"
-		cat > "/etc/systemd/nspawn/$(basename "$TARGET").nspawn" <<-EOF
-			[Exec]
-			PrivateUsers=false
+		log 'creating systemd-nspawn service file ...'
+		# systemd-nspawn@.service doesn't really work exactly correct, so just create a new service file
+		# don't use a template since upgrades in this script may not be applicable to existing instances
+		# so by defining the service directly (instead of with a template) allows instance differences to
+		# coexist side by side
+		cat > "/etc/systemd/system/$FQDN.service" <<-EOF
+			[Unit]
+			Description=$FQDN NextCloud Server
+			PartOf=machines.target
+			Before=machines.target
+			After=network.target systemd-resolved.service
+			RequiresMountsFor=$TARGET
 
-			[Network]
-			VirtualEthernet=no
-			MACVLAN=$NET_IFACE
+			[Service]
+			RuntimeDirectory=haproxy/$FQDN
+			ExecStart=systemd-nspawn --boot --quiet --keep-unit --directory="$TARGET" --machine="$FQDN" --bind=/run/haproxy/$FQDN:/run/nginx --network-macvlan=$NET_IFACE
+			KillMode=mixed
+			KillSignal=SIGPWR
+			RestartKillSignal=SIGTERM
+			Type=notify
+			Slice=machine.slice
+			Delegate=yes
 
-			[Files]
-			Bind=/var/lib/haproxy/$HOSTNAME.$DOMAIN:/run/nginx
+			[Install]
+			WantedBy=machines.target
 		EOF
-		mkdir -p "/var/lib/haproxy/$HOSTNAME.$DOMAIN"
 	}
 
 	{
@@ -256,14 +274,14 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 		echo 'console::respawn:/sbin/getty 38400 console' >> "$TARGET/etc/inittab"
 
 		log 'setting hostname ...'
-		echo "$HOSTNAME" > "$TARGET/etc/hostname"
-		echo "127.0.1.1	$HOSTNAME.$DOMAIN $HOSTNAME" >> "$TARGET/etc/hosts"
+		echo "${FQDN%%.*}" > "$TARGET/etc/hostname"
+		echo "127.0.1.1	$FQDN ${FQDN%%.*}" >> "$TARGET/etc/hosts"
 
 		log 'enabling system services ...'
-		for service in networking bootmisc hostname syslog; do
+		for service in "networking" "bootmisc" "hostname" "syslog"; do
 			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/boot/$service"
 		done
-		for service in killprocs savecache; do
+		for service in "killprocs" "savecache"; do
 			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/shutdown/$service"
 		done
 	}
@@ -279,13 +297,20 @@ prepare_container() { # prepare the host by installing alpine linux into the /va
 		[ -n "$NEXTCLOUD_CACHE_DIR" ] && mkdir -p "$NEXTCLOUD_CACHE_DIR"
 
 		log 'spawning container ...'
+		mkdir -p "/run/haproxy/$FQDN"
 		systemd-nspawn \
 			--directory="$TARGET" \
-			--settings=false \
 			--console=pipe \
+			--network-macvlan=$NET_IFACE \
+			--bind="/run/haproxy/$FQDN:/run/nginx" \
 			${APK_CACHE_DIR:+--bind="$(cd "$APK_CACHE_DIR"; pwd):/etc/apk/cache"} \
 			${NEXTCLOUD_CACHE_DIR:+--bind="$(cd "$NEXTCLOUD_CACHE_DIR"; pwd):/tmp/cache/nextcloud"} \
-			'/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
+			sh - <<-EOF
+				ip link set up mv-$NET_IFACE
+				udhcpc -i mv-$NET_IFACE
+				'/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
+			EOF
+			rm -rf "/run/haproxy/$FQDN"
 	}
 }
 
@@ -304,10 +329,9 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 	load_config "$@"
 	print_alpine_config
+	[ -z "$FQDN" ] && { error 'fatal error: missing FQDN environment variable'; exit 1; }
+	[ -z "${FQDN#*.}" ] && { error 'fatal error: missing domain part of FQDN environment variable'; exit 1; }
 	mkdir -p '/usr/local/sbin' '/usr/local/bin' # ensure directories for utility scripts exist
-
-	# log 'creating nextcloud system user ...'
-	# adduser -HDS nextcloud
 
 	log 'creating data directory ...'
 	mkdir -p "$DATA_DIR_PREFIX/nextcloud"
@@ -338,7 +362,10 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		ln -s './postgres' '/usr/local/sbin/initdb'
 
 		log 'initializing postgresql cluster ...'
-		initdb --data-checksums
+		initdb --data-checksums \
+			--auth-local=trust \
+			--encoding=UTF8
+			# --locale=POSIX
 
 		log 'disabling postgresql TCP access ...'
 		update_file "$PGDATA/postgresql.conf" \
@@ -391,6 +418,243 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			php7-xmlwriter \
 			php7-zip
 
+		log 'enabling nginx and php7 ...'
+		rc-update add nginx default
+		rc-update add php-fpm7 default
+
+		( # configure tls certificates
+			mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
+			log 'configuring nginx for letsencrypt ...'
+			cat > '/etc/nginx/http.d/http.conf' <<-EOF
+				server {
+						listen 80;
+						listen [::]:80;
+						listen unix:/run/nginx/http.sock proxy_protocol;
+						server_name $FQDN;
+						location '/.well-known/acme-challenge' {
+								default_type "text/plain";
+								root /var/lib/nginx/html;
+						}
+						location / {
+								return 301 https://\$server_name\$request_uri;
+						}
+				}
+			EOF
+
+			log "creating ssl certificate utility script \`certman\` ..."
+			cat > '/usr/local/sbin/certman' <<-EOF
+				#!/bin/sh -e
+				# generate ssl private key and request/renew related certificate
+				FQDN="\$(hostname -f)"
+				if [ "\$1" = "--self-signed" ]; then
+				  printf "generating self signed certificate\n\n"
+				  command -v openssl >/dev/null || apk add openssl
+				  openssl req -x509 \
+				    -nodes \
+				    -days 365 \
+				    -newkey ec \
+				    -pkeyopt ec_paramgen_curve:secp384r1 \
+				    -subj "/CN=\$FQDN" \
+				    -keyout '/etc/nginx/key.pem' \
+				    -out '/etc/nginx/cert.pem'
+				  ln -s './cert.pem' '/etc/nginx/ca.pem'
+				elif [ -d "/etc/letsencrypt/\$FQDN" ]; then
+				  printf "renewing existing letsencrypt certificate\n\n"
+				  command -v certbot >/dev/null || apk add certbot
+				  certbot renew --post-hook "rc-service nginx reload"
+				else # request a new letsencrypt certificate
+				  printf "requesting new letsencrypt certificate\n\n"
+				  command -v certbot >/dev/null || apk add certbot
+				  certbot certonly --domain "\$FQDN" \
+				    --key-type ecdsa \
+				    --elliptic-curve secp384r1 \
+				    --webroot \
+				    --webroot-path="/var/lib/nginx/html" \
+				    --email "admin@\$FQDN" \
+				    --agree-tos \
+				    --non-interactive
+				  ln -fs "../letsencrypt/live/\$FQDN/privkey.pem" '/etc/nginx/key.pem'
+				  ln -fs "../letsencrypt/live/\$FQDN/fullchain.pem" '/etc/nginx/cert.pem'
+				  ln -fs './cert.pem' '/etc/nginx/ca.pem'
+				  # create link to run this script weekly to take care of renewals
+				  ln -fs "\$(realpath "\$0")" '/etc/periodic/weekly/certman.sh'
+				fi
+			EOF
+			chmod +x '/usr/local/sbin/certman'
+
+			mkdir -p '/run/nginx'
+			chown nginx:www-data '/run/nginx'
+			nginx # start nginx with minimal config to serve .well-known/acme-challenge
+			log 'requesting letsencrypt certificate ...'
+			certman || {
+				warn 'letsencrypt certificate request failure - generating self-signed certificate ...'
+				certman --self-signed
+			}
+			nginx -s quit
+		)
+
+		log 'configuring nginx for nextcloud ...'
+		cat > '/etc/nginx/http.d/https.conf' <<-EOF
+			# adapted from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
+			upstream php-handler {
+			    server unix:/var/run/php-fpm7/php-fpm.sock;
+			}
+
+			server {
+			    listen 443      ssl http2;
+			    listen [::]:443 ssl http2;
+			    listen unix:/run/nginx/https.sock ssl http2 proxy_protocol;
+			    server_name $FQDN;
+
+			    # generated 2021-06-15, Mozilla Guideline v5.6, nginx 1.18.0, OpenSSL 1.1.1k, modern configuration, no HSTS
+			    # https://ssl-config.mozilla.org/#server=nginx&version=1.18.0&config=modern&openssl=1.1.1k&hsts=false&guideline=5.6
+			    ssl_certificate /etc/nginx/cert.pem;
+			    ssl_certificate_key /etc/nginx/key.pem;
+			    ssl_session_timeout 1d;
+			    ssl_session_cache shared:MozSSL:10m;  # about 40000 sessions
+			    ssl_session_tickets off;
+
+			    # modern configuration
+			    ssl_protocols TLSv1.3;
+			    ssl_prefer_server_ciphers off;
+
+			    # OCSP stapling
+			    ssl_stapling on;
+			    ssl_stapling_verify on;
+
+			    # verify chain of trust of OCSP response using Root CA and Intermediate certs
+			    ssl_trusted_certificate /etc/nginx/ca.pem;
+
+			    # replace with the IP address of your resolver
+			    resolver 127.0.0.1;
+
+			    # set max upload size
+			    client_max_body_size 512M;
+			    fastcgi_buffers 64 4K;
+
+			    # Enable gzip but do not remove ETag headers
+			    gzip on;
+			    gzip_vary on;
+			    gzip_comp_level 4;
+			    gzip_min_length 256;
+			    gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
+			    gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
+
+			    # Pagespeed is not supported by Nextcloud, so if your server is built
+			    # with the \`ngx_pagespeed\` module, uncomment this line to disable it.
+			    #pagespeed off;
+
+			    # HTTP response headers borrowed from Nextcloud \`.htaccess\`
+			    add_header Referrer-Policy                      "no-referrer"   always;
+			    add_header X-Content-Type-Options               "nosniff"       always;
+			    add_header X-Download-Options                   "noopen"        always;
+			    add_header X-Frame-Options                      "SAMEORIGIN"    always;
+			    add_header X-Permitted-Cross-Domain-Policies    "none"          always;
+			    add_header X-Robots-Tag                         "none"          always;
+			    add_header X-XSS-Protection                     "1; mode=block" always;
+
+			    # Remove X-Powered-By, which is an information leak
+			    fastcgi_hide_header X-Powered-By;
+
+			    # Path to the root of your installation
+			    root $APP_DIR_PREFIX/nextcloud;
+
+			    # Specify how to handle directories -- specifying \`/index.php\$request_uri\`
+			    # here as the fallback means that Nginx always exhibits the desired behaviour
+			    # when a client requests a path that corresponds to a directory that exists
+			    # on the server. In particular, if that directory contains an index.php file,
+			    # that file is correctly served; if it doesn't, then the request is passed to
+			    # the front-end controller. This consistent behaviour means that we don't need
+			    # to specify custom rules for certain paths (e.g. images and other assets,
+			    # \`/updater\`, \`/ocm-provider\`, \`/ocs-provider\`), and thus
+			    # \`try_files \$uri \$uri/ /index.php\$request_uri\`
+			    # always provides the desired behaviour.
+			    index index.php index.html /index.php\$request_uri;
+
+			    # Rule borrowed from \`.htaccess\` to handle Microsoft DAV clients
+			    location = / {
+			        if ( \$http_user_agent ~ ^DavClnt ) {
+			            return 302 /remote.php/webdav/\$is_args\$args;
+			        }
+			    }
+
+			    location = /robots.txt {
+			        allow all;
+			        log_not_found off;
+			        access_log off;
+			    }
+
+			    # Make a regex exception for \`/.well-known\` so that clients can still
+			    # access it despite the existence of the regex rule
+			    # \`location ~ /(\\.|autotest|...)\` which would otherwise handle requests
+			    # for \`/.well-known\`.
+			    location ^~ /.well-known {
+			        # The rules in this block are an adaptation of the rules
+			        # in \`.htaccess\` that concern \`/.well-known\`.
+
+			        location = /.well-known/carddav { return 301 /remote.php/dav/; }
+			        location = /.well-known/caldav  { return 301 /remote.php/dav/; }
+
+			        location /.well-known/acme-challenge    { try_files \$uri \$uri/ =404; }
+			        location /.well-known/pki-validation    { try_files \$uri \$uri/ =404; }
+
+			        # Let Nextcloud's API for \`/.well-known\` URIs handle all other
+			        # requests by passing them to the front-end controller.
+			        return 301 /index.php\$request_uri;
+			    }
+
+			    # Rules borrowed from \`.htaccess\` to hide certain paths from clients
+			    location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/)  { return 404; }
+			    location ~ ^/(?:\\.|autotest|occ|issue|indie|db_|console)                { return 404; }
+
+			    # Ensure this block, which passes PHP files to the PHP process, is above the blocks
+			    # which handle static assets (as seen below). If this block is not declared first,
+			    # then Nginx will encounter an infinite rewriting loop when it prepends \`/index.php\`
+			    # to the URI, resulting in a HTTP 500 error response.
+			    location ~ \\.php(?:$|/) {
+			        fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
+			        set \$path_info \$fastcgi_path_info;
+
+			        try_files \$fastcgi_script_name =404;
+
+			        include fastcgi_params;
+			        fastcgi_param REMOTE_ADDR \$proxy_protocol_addr;
+			        fastcgi_param REMOTE_PORT \$proxy_protocol_port;
+			        fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
+			        fastcgi_param PATH_INFO \$path_info;
+			        fastcgi_param HTTPS on;
+
+			        fastcgi_param modHeadersAvailable true;         # Avoid sending the security headers twice
+			        fastcgi_param front_controller_active true;     # Enable pretty urls
+			        fastcgi_pass php-handler;
+
+			        fastcgi_intercept_errors on;
+			        fastcgi_request_buffering off;
+			    }
+
+			    location ~ \\.(?:css|js|svg|gif)$ {
+			        try_files \$uri /index.php\$request_uri;
+			        expires 6M;         # Cache-Control policy borrowed from \`.htaccess\`
+			        access_log off;     # Optional: Don't log access to assets
+			    }
+
+			    location ~ \\.woff2?$ {
+			        try_files \$uri /index.php\$request_uri;
+			        expires 7d;         # Cache-Control policy borrowed from \`.htaccess\`
+			        access_log off;     # Optional: Don't log access to assets
+			    }
+
+			    # Rule borrowed from \`.htaccess\`
+			    location /remote {
+			        return 301 /remote.php\$request_uri;
+			    }
+
+			    location / {
+			        try_files \$uri \$uri/ /index.php\$request_uri;
+			    }
+			}
+		EOF
+
 		log 'increasing upload file size ...'
 		cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
 		update_file '/etc/php7/php.ini' \
@@ -404,167 +668,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			'/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' \
 			'/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/'
 
-		log 'configuring nginx ...'
-		mv '/etc/nginx/http.d/default.conf' '/etc/nginx/http.d/default.conf.orig'
-		# the following is adapted from https://docs.nextcloud.com/server/latest/admin_manual/installation/nginx.html
-		cat > "/etc/nginx/http.d/nextcloud.conf" <<-EOF
-			upstream php-handler {
-					#server 127.0.0.1:9000;
-					server unix:/var/run/php-fpm7/php-fpm.sock;
-			}
-
-			server {
-					listen 80;
-					listen [::]:80;
-					listen unix:/run/nginx/http.sock proxy_protocol;
-					server_name $HOSTNAME.$DOMAIN;
-					location '/.well-known/acme-challenge' {
-							default_type "text/plain";
-							root $APP_DIR_PREFIX/webapps/letsencrypt;
-					}
-					location / {
-							return 301 https://\$server_name\$request_uri;
-					}
-			}
-
-			server {
-					listen 443      ssl http2;
-					listen [::]:443 ssl http2;
-					listen unix:/run/nginx/https.sock ssl http2 proxy_protocol;
-					server_name $HOSTNAME.$DOMAIN;
-
-					# Use Mozilla's guidelines for SSL/TLS settings
-					# https://mozilla.github.io/server-side-tls/ssl-config-generator/
-					ssl_certificate     /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt;
-					ssl_certificate_key /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key;
-
-					# set max upload size
-					client_max_body_size 512M;
-					fastcgi_buffers 64 4K;
-
-					# Enable gzip but do not remove ETag headers
-					gzip on;
-					gzip_vary on;
-					gzip_comp_level 4;
-					gzip_min_length 256;
-					gzip_proxied expired no-cache no-store private no_last_modified no_etag auth;
-					gzip_types application/atom+xml application/javascript application/json application/ld+json application/manifest+json application/rss+xml application/vnd.geo+json application/vnd.ms-fontobject application/x-font-ttf application/x-web-app-manifest+json application/xhtml+xml application/xml font/opentype image/bmp image/svg+xml image/x-icon text/cache-manifest text/css text/plain text/vcard text/vnd.rim.location.xloc text/vtt text/x-component text/x-cross-domain-policy;
-
-					# Pagespeed is not supported by Nextcloud, so if your server is built
-					# with the \`ngx_pagespeed\` module, uncomment this line to disable it.
-					#pagespeed off;
-
-					# HTTP response headers borrowed from Nextcloud \`.htaccess\`
-					add_header Referrer-Policy                      "no-referrer"   always;
-					add_header X-Content-Type-Options               "nosniff"       always;
-					add_header X-Download-Options                   "noopen"        always;
-					add_header X-Frame-Options                      "SAMEORIGIN"    always;
-					add_header X-Permitted-Cross-Domain-Policies    "none"          always;
-					add_header X-Robots-Tag                         "none"          always;
-					add_header X-XSS-Protection                     "1; mode=block" always;
-
-					# Remove X-Powered-By, which is an information leak
-					fastcgi_hide_header X-Powered-By;
-
-					# Path to the root of your installation
-					root $APP_DIR_PREFIX/nextcloud;
-
-					# Specify how to handle directories -- specifying \`/index.php\$request_uri\`
-					# here as the fallback means that Nginx always exhibits the desired behaviour
-					# when a client requests a path that corresponds to a directory that exists
-					# on the server. In particular, if that directory contains an index.php file,
-					# that file is correctly served; if it doesn't, then the request is passed to
-					# the front-end controller. This consistent behaviour means that we don't need
-					# to specify custom rules for certain paths (e.g. images and other assets,
-					# \`/updater\`, \`/ocm-provider\`, \`/ocs-provider\`), and thus
-					# \`try_files \$uri \$uri/ /index.php\$request_uri\`
-					# always provides the desired behaviour.
-					index index.php index.html /index.php\$request_uri;
-
-					# Rule borrowed from \`.htaccess\` to handle Microsoft DAV clients
-					location = / {
-							if ( \$http_user_agent ~ ^DavClnt ) {
-									return 302 /remote.php/webdav/\$is_args\$args;
-							}
-					}
-
-					location = /robots.txt {
-							allow all;
-							log_not_found off;
-							access_log off;
-					}
-
-					# Make a regex exception for \`/.well-known\` so that clients can still
-					# access it despite the existence of the regex rule
-					# \`location ~ /(\\.|autotest|...)\` which would otherwise handle requests
-					# for \`/.well-known\`.
-					location ^~ /.well-known {
-							# The rules in this block are an adaptation of the rules
-							# in \`.htaccess\` that concern \`/.well-known\`.
-
-							location = /.well-known/carddav { return 301 /remote.php/dav/; }
-							location = /.well-known/caldav  { return 301 /remote.php/dav/; }
-
-							location /.well-known/acme-challenge    { try_files \$uri \$uri/ =404; }
-							location /.well-known/pki-validation    { try_files \$uri \$uri/ =404; }
-
-							# Let Nextcloud's API for \`/.well-known\` URIs handle all other
-							# requests by passing them to the front-end controller.
-							return 301 /index.php\$request_uri;
-					}
-
-					# Rules borrowed from \`.htaccess\` to hide certain paths from clients
-					location ~ ^/(?:build|tests|config|lib|3rdparty|templates|data)(?:$|/)  { return 404; }
-					location ~ ^/(?:\\.|autotest|occ|issue|indie|db_|console)                { return 404; }
-
-					# Ensure this block, which passes PHP files to the PHP process, is above the blocks
-					# which handle static assets (as seen below). If this block is not declared first,
-					# then Nginx will encounter an infinite rewriting loop when it prepends \`/index.php\`
-					# to the URI, resulting in a HTTP 500 error response.
-					location ~ \\.php(?:$|/) {
-							fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
-							set \$path_info \$fastcgi_path_info;
-
-							try_files \$fastcgi_script_name =404;
-
-							include fastcgi_params;
-							fastcgi_param REMOTE_ADDR \$proxy_protocol_addr;
-							fastcgi_param REMOTE_PORT \$proxy_protocol_port;
-							fastcgi_param SCRIPT_FILENAME \$document_root\$fastcgi_script_name;
-							fastcgi_param PATH_INFO \$path_info;
-							fastcgi_param HTTPS on;
-
-							fastcgi_param modHeadersAvailable true;         # Avoid sending the security headers twice
-							fastcgi_param front_controller_active true;     # Enable pretty urls
-							fastcgi_pass php-handler;
-
-							fastcgi_intercept_errors on;
-							fastcgi_request_buffering off;
-					}
-
-					location ~ \\.(?:css|js|svg|gif)$ {
-							try_files \$uri /index.php\$request_uri;
-							expires 6M;         # Cache-Control policy borrowed from \`.htaccess\`
-							access_log off;     # Optional: Don't log access to assets
-					}
-
-					location ~ \\.woff2?$ {
-							try_files \$uri /index.php\$request_uri;
-							expires 7d;         # Cache-Control policy borrowed from \`.htaccess\`
-							access_log off;     # Optional: Don't log access to assets
-					}
-
-					# Rule borrowed from \`.htaccess\`
-					location /remote {
-							return 301 /remote.php\$request_uri;
-					}
-
-					location / {
-							try_files \$uri \$uri/ /index.php\$request_uri;
-					}
-			}
-		EOF
-
 		log 'configuring php7 ...'
 		cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
 		# shellcheck disable=SC2016
@@ -575,10 +678,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			'/^;listen\.owner =/ s/.*/listen.owner = nginx/' \
 			'/^;listen\.group =/ s/.*/listen.group = www-data/' \
 			's/^;env/env/'
-
-		log 'enabling nginx and php7 ...'
-		rc-update add nginx default
-		rc-update add php-fpm7 default
 	}
 
 	{ # download and install nextcloud
@@ -785,9 +884,9 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 	log 'the admin password is saved in the container at "/root/nextcloud_password"'
 
 	# shellcheck disable=SC2016
-	log 'use `systemd-nspawn -bM %s` to manually start container' "$HOSTNAME"
+	log 'use `systemd-nspawn -bM %s` to manually start container' "$FQDN"
 	# shellcheck disable=SC2016
-	log 'use `systemctl enable systemd-nspawn@%s.service` to automatically start container at boot' "$HOSTNAME"
+	log 'use `systemctl enable systemd-nspawn@%s.service` to automatically start container at boot' "$FQDN"
 	log 'use the wrapper script at '/usr/local/sbin/occ' to run maintenance commands inside the container'
 	log 'use the wrapper script at '/usr/local/sbin/psql' to connect to the nextcloud db inside the container'
 }
@@ -809,37 +908,3 @@ case "${SCRIPT_ENV:="$(. /etc/os-release; echo "$ID")"}" in
 		prepare_container "$@"
 		;;
 esac
-
-
-
-
-
-
-
-
-
-
-
-		# log 'creating self signed certificate ...'
-		# apk add openssl
-		# mkdir -p '/etc/ssl/nginx'
-		# openssl req -x509 \
-		# 	-nodes \
-		# 	-days 365 \
-		# 	-newkey rsa:4096 \
-		# 	-subj "/CN=$HOSTNAME.$DOMAIN" \
-		# 	-keyout /etc/ssl/nginx/$HOSTNAME.$DOMAIN.key \
-		# 	-out /etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt
-
-		# log 'installing certbot ...'
-		# apk add certbot certbot-nginx
-
-		# log 'requesting letsencrypt certificate ...'
-		# # certbot certonly -d "$HOSTNAME.$DOMAIN" -m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive \
-		# # 	--webroot --webroot-path="$APP_DIR/webapps/letsencrypt/"
-		# # certbot certonly --standalone --preferred-challenges http -d "$HOSTNAME.$DOMAIN" \
-		# # 	-m "admin@$HOSTNAME.$DOMAIN" --agree-tos --non-interactive
-		# # ln -s "../../letsencrypt/live/cloud.varasys.io/fullchain.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.crt"
-		# # ln -s "../../letsencrypt/live/cloud.varasys.io/privkey.pem" "/etc/ssl/nginx/$HOSTNAME.$DOMAIN.key"
-		# certbot -d "$HOSTNAME.$DOMAIN" --nginx --agree-tos --non-interactive -m "admin@$HOSTNAME.$DOMAIN"
-
