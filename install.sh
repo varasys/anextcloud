@@ -800,12 +800,20 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		chown -R nginx:www-data "$APP_DIR_PREFIX/nextcloud"
 
 		log 'creating wrapper script at "/usr/local/sbin/occ" ...'
-		cat > "/usr/local/sbin/occ" <<-EOF
+		cat > '/usr/local/sbin/occ' <<-EOF
 			#!/bin/sh -eu
 			CMD="/usr/bin/php '$APP_DIR_PREFIX/nextcloud/occ' \$@"
 			su -s /bin/sh nginx -c "\$CMD"
 		EOF
 		chmod +x '/usr/local/sbin/occ'
+
+		log 'creating script to view Nextcloud log at "/usr/local/bin/nclog" ...'
+		apk add jq
+		cat > '/usr/local/bin/nclog' <<-EOF
+			#!/bin/sh -eu
+			tail -f "$DATA_DIR_PREFIX/nextcloud/nextcloud.log" | jq
+		EOF
+		chmod +x '/usr/local/bin/nclog'
 
 		log 'generating admin password ...'
 		ADMIN_PASS="$(tr -dc A-Za-z0-9 </dev/urandom | head -c 13)"

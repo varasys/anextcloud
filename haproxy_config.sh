@@ -8,6 +8,43 @@ YELLOW='\e[0;33;1m'
 BLUE='\e[0;34;1m'
 PURPLE='\e[0;35;1m'
 
+if echo "$1" | grep -q '^-\?-h'; then
+	cat >&2 <<-EOF
+		$(basename "$0") - configure haproxy for tcp passthrough
+
+		usage: $0 domain1 [domain2 ...]
+		where:
+		  'domain1' is the domain being served
+		  'domain2 ...' are additional domains to configure
+
+		This script will configure haproxy to pass through tcp connections so
+		TLS connections are terminated by the endpoint instead of haproxy.
+
+		The main reason for doing this is to pass through connections to containers
+		(typically running with \`systemd-nspawn\`) so that the container is fully
+		self-contained - and specifically, the root filesystem can be copied over
+		to another machine without requiring any changes to the host machine config
+		on either machine.
+
+		For instance, the configuration to renew letsencrypt TLS certificates can be
+		fully encapsulated in the container (including cron job for renews, etc.),
+		and if the container is moved to another machine, it will be included.
+
+		This configuration is based on sockets and NOT tcp/ip addresses, so for
+		each domain being passed through, the related sockets (ie. from nginx or
+		apache) must be created in the /run/haproxy/<domain> directory. The required
+		sockets are:
+		  /run/haproxy/<domain>/http.sock
+			/run/haproxy/<domain>/https.sock
+
+		Typically the sockets above would be created by bind mounting the host
+		/run/haproxy/<domain> directory into the container at /run/nginx (for
+		example), and then configuring nginx or apache to create the sockets.
+
+	EOF
+	exit 0
+fi
+
 # define logging utility functions
 log() {
 	msg="$1"; shift
