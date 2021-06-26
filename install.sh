@@ -5,10 +5,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 # 1) it will restart itself if not run as root, and
 # 2) it pipes itself into the container, and then runs within the container to finish the configuration
 
-# TODO install certbot (use env variable to know whether to run?)
-# TODO run cronjob to update lets encrypt cert
 # TODO install mail server
-# TODO update motd
 
 
 { # define utility functions for logging
@@ -68,12 +65,20 @@ print_host_config() { # variables used to setup a host environment
 
 		# fully qualified domain name
 		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
-		# location of the container rootfs (on the host)
+		# installation location of the container rootfs (on the host)
 		TARGET='${TARGET:="/var/lib/machines/$FQDN"}'
-		# alpine linux distribution mirror location
-		MIRROR='${MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
-		# alpine linux stream
-		VERSION='${VERSION:="latest-stable"}'
+		# host architecture
+		ARCH='${ARCH:="$(arch)"}'
+		# Alpine Linux branch
+		ALPINE_BRANCH='${ALPINE_BRANCH:="3.14"}'
+		# Alpine Linux release
+		ALPINE_RELEASE='${ALPINE_RELEASE:="0"}'
+		# Alpine Linux distribution mirror location
+		ALPINE_MIRROR='${ALPINE_MIRROR:="https://dl-cdn.alpinelinux.org/alpine"}'
+		# Alpine Linux minirootfs url
+		ALPINE_URL='${ALPINE_URL:="${ALPINE_MIRROR}/v${ALPINE_BRANCH}/releases/${ARCH}/alpine-minirootfs-${ALPINE_BRANCH}.${ALPINE_RELEASE}-${ARCH}.tar.gz"}'
+		# Alpine Linux minirootfs signature url
+		ALPINE_SIG_URL='${ALPINE_SIG_URL:="${ALPINE_URL}.asc"}'
 		# host network interface (for MACVLAN)
 		NET_IFACE='${NET_IFACE:="eth0"}'
 		# cache dir
@@ -82,8 +87,6 @@ print_host_config() { # variables used to setup a host environment
 		APK_CACHE_DIR='${APK_CACHE_DIR="${CACHE_DIR+"$CACHE_DIR/apk"}"}'
 		# nextcloud cache dir
 		NEXTCLOUD_CACHE_DIR='${NEXTCLOUD_CACHE_DIR="${CACHE_DIR+"$CACHE_DIR/nextcloud"}"}'
-		# use cached version of apk-tools to bootstrap alpine linux (name of apk-tools-static-xxx.apk file in the cache directory)
-		APKTOOLS='${APKTOOLS:=""}'
 
 	EOF
 }
@@ -104,8 +107,6 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		APP_DIR_PREFIX="${APP_DIR_PREFIX:="/usr/local/share"}"
 		# nextcloud data dir
 		DATA_DIR_PREFIX="${DATA_DIR_PREFIX:="/var/lib"}"
-		# LetsEncrypt contact email (leave blank to skip requesting letsencrypt cert)
-		LETSENCRYPT_EMAIL="${LETSENCRYPT_EMAIL="admin@$FQDN"}"
 		# apps to install
 		APPS='${APPS="
 		  calendar
@@ -167,55 +168,96 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 				&& exit 1
 			find "$TARGET" ! -wholename "$TARGET" -delete
 		fi
+		TARGET="$(realpath "$TARGET")" # update variable with absolute path
 	}
 
 	{
-		apkdir="$(mktemp --tmpdir="$TARGET" --directory)"
-		trap 'rm -rf "$apkdir"' EXIT
+		log 'installing Alpine Linux gpg key ...'
+		export GNUPGHOME="$TARGET/gnupg"
+		mkdir --mode 700 "$GNUPGHOME"
+		gpg --import <<-EOF
+			-----BEGIN PGP PUBLIC KEY BLOCK-----
+			Version: GnuPG v2
 
-		APKTOOLS="${APKTOOLS:="$(curl -s -fL "$MIRROR/$VERSION/main/$(arch)" | grep -Eo 'apk-tools-static[^"]+\.apk' | head -n 1)"}"
-		log 'installing Alpine Linux using: "%s" ...' "$APKTOOLS"
-		if [ -n "$APK_CACHE_DIR" ] && [ -f "$APK_CACHE_DIR/$APKTOOLS" ]; then
-			log 'extracting cached apk-tools ...'
-			tar -xzf "$APK_CACHE_DIR/$APKTOOLS" -C "$apkdir"
-		else
-			log 'downloading apk-tools from "%s" ...' "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS"
-			if [ -n "$APK_CACHE_DIR" ]; then
-				curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tee "$APK_CACHE_DIR/$APKTOOLS" | tar -xz -C "$apkdir"
-			else
-				curl -s -fL "$MIRROR/$VERSION/main/$(arch)/$APKTOOLS" | tar -xz -C "$apkdir"
-			fi
-		fi
-
-		log 'installing alpine linux key ...'
-		mkdir -p "$apkdir/keys"
-		cat > "$apkdir/keys/alpine-devel@lists.alpinelinux.org-58199dcc.rsa.pub" <<-EOF
-			-----BEGIN PUBLIC KEY-----
-			MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEA3v8/ye/V/t5xf4JiXLXa
-			hWFRozsnmn3hobON20GdmkrzKzO/eUqPOKTpg2GtvBhK30fu5oY5uN2ORiv2Y2ht
-			eLiZ9HVz3XP8Fm9frha60B7KNu66FO5P2o3i+E+DWTPqqPcCG6t4Znk2BypILcit
-			wiPKTsgbBQR2qo/cO01eLLdt6oOzAaF94NH0656kvRewdo6HG4urbO46tCAizvCR
-			CA7KGFMyad8WdKkTjxh8YLDLoOCtoZmXmQAiwfRe9pKXRH/XXGop8SYptLqyVVQ+
-			tegOD9wRs2tOlgcLx4F/uMzHN7uoho6okBPiifRX+Pf38Vx+ozXh056tjmdZkCaV
-			aQIDAQAB
-			-----END PUBLIC KEY-----
+			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
+			Mkc=
+			=FcYC
+			-----END PGP PUBLIC KEY BLOCK-----
 		EOF
+		log 'setting ultimate trust on Alpine Linux gpg key ...'
+		echo '0482D84022F52DF1C4E7CD43293ACD0907D9495A:6:' | gpg --import-ownertrust
 
 		log 'installing alpine linux to: %s ...' "$TARGET"
 
-		if [ -n "$APK_CACHE_DIR" ]; then
-			mkdir -p "$APK_CACHE_DIR" "$TARGET/etc/apk"
-			ln -s "$(cd "$APK_CACHE_DIR"; pwd)" "$TARGET/etc/apk/cache"
+		if [ -n "$CACHE_DIR" ]; then
+			log 'using cache dir "%s"' "$CACHE_DIR"
+			mkdir -p "$CACHE_DIR"
+			ln -s "$(realpath "$CACHE_DIR")" "$TARGET/alpine"
+		else
+			mkdir "$TARGET/alpine"
 		fi
-		"$apkdir/sbin/apk.static" \
-			--keys-dir "$apkdir/keys" \
-			--verbose \
-			--progress \
-			--root "$TARGET" \
-			--initdb \
-			--repository "$MIRROR/$VERSION/main" \
-			add alpine-base
-		[ -h "$TARGET/etc/apk/cache" ] && rm "$TARGET/etc/apk/cache" # remove apk cache symlink
+		(
+			cd "$TARGET/alpine"
+			if [ ! -f "$(basename "$ALPINE_URL")" ]; then
+				log 'downloading Alpine Linux minirootfs ...'
+				curl -LO "$ALPINE_URL"
+			fi
+			if [ ! -f "$(basename "$ALPINE_SIG_URL")" ]; then
+				log 'downloading Alpine Linux minirootfs signature ...'
+				curl -LO "$ALPINE_SIG_URL"
+			fi
+			log 'verifying Alpine Linux minirootfs ...'
+			gpg --verify "$(basename "$ALPINE_SIG_URL")" "$(basename "$ALPINE_URL")"
+			log 'extracting Alpine Linux minirootfs ...'
+			tar -axf "$(basename "$ALPINE_URL")" -C "$TARGET"
+			mv "$GNUPGHOME" "$TARGET/root/.gnupg"
+			rm -r "$TARGET/alpine"
+		)
 	}
 
 	{
@@ -234,7 +276,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 
 			[Service]
 			RuntimeDirectory=haproxy/$FQDN
-			ExecStart=systemd-nspawn --boot --quiet --keep-unit --directory="$TARGET" --machine="$FQDN" --bind=/run/haproxy/$FQDN:/run/nginx --network-macvlan=$NET_IFACE
+			ExecStart=systemd-nspawn --quiet --keep-unit --boot --directory="$TARGET" --machine="$FQDN" --bind=/run/haproxy/$FQDN:/run/nginx --network-macvlan=$NET_IFACE
 			KillMode=mixed
 			KillSignal=SIGPWR
 			RestartKillSignal=SIGTERM
@@ -248,12 +290,6 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 	}
 
 	{
-		log 'configuring alpine linux repositories ...'
-		cat > "$TARGET/etc/apk/repositories" <<-EOF
-			$MIRROR/$VERSION/main
-			$MIRROR/$VERSION/community
-		EOF
-
 		log 'configuring container networking ...'
 		cat > "$TARGET/etc/network/interfaces" <<-EOF
 			auto lo
@@ -278,9 +314,11 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 		echo "127.0.1.1	$FQDN ${FQDN%%.*}" >> "$TARGET/etc/hosts"
 
 		log 'enabling system services ...'
+		mkdir -p "$TARGET/etc/runlevels/boot"
 		for service in "networking" "bootmisc" "hostname" "syslog"; do
 			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/boot/$service"
 		done
+		mkdir -p "$TARGET/etc/runlevels/shutdown"
 		for service in "killprocs" "savecache"; do
 			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/shutdown/$service"
 		done
@@ -306,8 +344,10 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 			${APK_CACHE_DIR:+--bind="$(cd "$APK_CACHE_DIR"; pwd):/etc/apk/cache"} \
 			${NEXTCLOUD_CACHE_DIR:+--bind="$(cd "$NEXTCLOUD_CACHE_DIR"; pwd):/tmp/cache/nextcloud"} \
 			sh - <<-EOF
+				passwd -d root
 				ip link set up mv-$NET_IFACE
 				udhcpc -i mv-$NET_IFACE
+				apk add alpine-base
 				'/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
 			EOF
 			rm -rf "/run/haproxy/$FQDN"
@@ -362,10 +402,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		ln -s './postgres' '/usr/local/sbin/initdb'
 
 		log 'initializing postgresql cluster ...'
-		initdb --data-checksums \
-			--auth-local=trust \
-			--encoding=UTF8
-			# --locale=POSIX
+		initdb --data-checksums --auth-local=trust --encoding=UTF8
 
 		log 'disabling postgresql TCP access ...'
 		update_file "$PGDATA/postgresql.conf" \
@@ -878,10 +915,9 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 	log 'stopping postgresql database ...'
 	pg_ctl stop --mode=smart
 
-	log 'finished installing nextcloud'
-	warn "\nnextcloud admin user: 'admin'"
-	warn "nextcloud admin pass: '%s'\n" "$ADMIN_PASS"
-	log 'the admin password is saved in the container at "/root/nextcloud_password"'
+	log 'finished installing Nextcloud'
+	warn "\nNextcloud admin user: 'admin'\nNextcloud admin pass: '%s'" "$ADMIN_PASS"
+	log 'the admin password above is saved in the container at "/root/nextcloud_password"'
 
 	# shellcheck disable=SC2016
 	log 'use `systemd-nspawn -bM %s` to manually start container' "$FQDN"
