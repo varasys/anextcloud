@@ -253,6 +253,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 			fi
 			log 'verifying Alpine Linux minirootfs ...'
 			gpg --verify "$(basename "$ALPINE_SIG_URL")" "$(basename "$ALPINE_URL")"
+			gpgconf --kill gpg-agent # clean up after gpg
 			log 'extracting Alpine Linux minirootfs ...'
 			tar -axf "$(basename "$ALPINE_URL")" -C "$TARGET"
 			mv "$GNUPGHOME" "$TARGET/root/.gnupg"
@@ -287,6 +288,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 			[Install]
 			WantedBy=machines.target
 		EOF
+		systemctl daemon-reload
 	}
 
 	{
