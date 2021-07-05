@@ -46,7 +46,6 @@ case "$(echo "$MACHINES" | wc -l)" in
 		exit 1
 		;;
 	1)
-		echo enter the machine
 		LEADER=$(machinectl show --property=Leader "$MACHINES")
 		PID="${LEADER##Leader=}"
 		printf "entering namespace for %s (PID %s) ...\n" "$MACHINES" "$PID" >&2

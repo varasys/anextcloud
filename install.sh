@@ -277,11 +277,11 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 
 			[Service]
 			RuntimeDirectory=haproxy/$FQDN
-			ExecStart=systemd-nspawn --quiet --keep-unit --boot --directory="$TARGET" --machine="$FQDN" --bind=/run/haproxy/$FQDN:/run/nginx --network-macvlan=$NET_IFACE
+			ExecStart=systemd-nspawn --quiet --keep-unit --boot --kill-signal=SIGPWR --directory="$TARGET" --machine="$FQDN" --bind=/run/haproxy/$FQDN:/run/nginx --network-macvlan=$NET_IFACE
 			KillMode=mixed
-			KillSignal=SIGPWR
-			RestartKillSignal=SIGTERM
-			Type=notify
+			Type=simple
+			RestartForceExitStatus=133
+			SuccessExitStatus=133
 			Slice=machine.slice
 			Delegate=yes
 
