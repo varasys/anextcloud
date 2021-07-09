@@ -98,7 +98,7 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		# fully qualified domain name
 		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
 		# nextcloud version
-		NEXTCLOUD_VER='${NEXTCLOUD_VER:="21"}'
+		NEXTCLOUD_VER='${NEXTCLOUD_VER:="22"}'
 		# nextcloud download url
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/latest-${NEXTCLOUD_VER}.tar.bz2"}'
 		# nextcloud signature download url
@@ -466,21 +466,21 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			log 'configuring nginx for letsencrypt ...'
 			cat > '/etc/nginx/http.d/http.conf' <<-EOF
 				server {
-						listen 80;
-						listen [::]:80;
-						listen unix:/run/nginx/http.sock proxy_protocol;
-						server_name $FQDN;
-						location '/.well-known/acme-challenge' {
-								default_type "text/plain";
-								root /var/lib/nginx/html;
-						}
-						location / {
-								return 301 https://\$server_name\$request_uri;
-						}
+				    listen 80;
+				    listen [::]:80;
+				    listen unix:/run/nginx/http.sock proxy_protocol;
+				    server_name $FQDN;
+				    location '/.well-known/acme-challenge' {
+				        default_type "text/plain";
+				        root /var/lib/nginx/html;
+				    }
+				    location / {
+				        return 301 https://\$server_name\$request_uri;
+				    }
 				}
 			EOF
 
-			log "creating ssl certificate utility script \`certman\` ..."
+			log "creating ssl certificate utility script \`/usr/local/sbin/certman\` ..."
 			cat > '/usr/local/sbin/certman' <<-EOF
 				#!/bin/sh -e
 				# generate ssl private key and request/renew related certificate
@@ -568,7 +568,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			    resolver 127.0.0.1;
 
 			    # set max upload size
-			    client_max_body_size 512M;
+			    client_max_body_size 4G;
 			    fastcgi_buffers 64 4K;
 
 			    # Enable gzip but do not remove ETag headers
@@ -694,18 +694,26 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			}
 		EOF
 
-		log 'increasing upload file size ...'
 		cp '/etc/php7/php.ini' '/etc/php7/php.ini.orig'
-		update_file '/etc/php7/php.ini' \
-			'/^memory_limit =/ s/.*/memory_limit = 1G/' \
-			'/^upload_max_filesize =/ s/.*/upload_max_filesize = 16G/' \
-			'/^post_max_size =/ s/.*/post_max_size = 16G/'
 
-		log 'disabling TLSv1.1 and increasing nginx client max body size ...'
-		cp '/etc/nginx/nginx.conf' '/etc/nginx/nginx.conf.orig'
-		update_file '/etc/nginx/nginx.conf' \
-			'/^\tssl_protocols / s/.*/	ssl_protocols TLSv1.2 TLSv1.3;/' \
-			'/^\tclient_max_body_size / s/.*/	client_max_body_size 16G;/'
+		log 'configuring php7 upload file size ...'
+		# https://docs.nextcloud.com/server/latest/admin_manual/configuration_files/big_file_upload_configuration.html
+		update_file '/etc/php7/php.ini' \
+			'/^;\?memory_limit \?=/ s/.*/memory_limit = 1G/' \
+			'/^;\?upload_max_filesize \?=/ s/.*/upload_max_filesize = 4G/' \
+			'/^;\?post_max_size \?=/ s/.*/post_max_size = 4G/' \
+			# '/^;\?max_input_time \?=/ s/.*/max_input_time = 3200/' \
+			# '/^;\?max_execution_time \?=/ s/.*/max_execution_time = 3200/' \
+
+		log 'configuring php7 opcache ...'
+		# https://docs.nextcloud.com/server/latest/admin_manual/installation/server_tuning.html
+		update_file '/etc/php7/php.ini' \
+			'/^;\?opcache.enable \?=/ s/.*/opcache.enable = 1/' \
+			'/^;\?opcache.interned_strings_buffer \?=/ s/.*/opcache.interned_strings_buffer = 8/' \
+			'/^;\?opcache.max_accelerated_files \?=/ s/.*/opcache.max_accelerated_files = 10000/' \
+			'/^;\?opcache.memory_consumption \?=/ s/.*/opcache.memory_consumption = 128/' \
+			'/^;\?opcache.save_comments \?=/ s/.*/opcache.save_comments = 1/' \
+			'/^;\?opcache.revalidate_freq \?=/ s/.*/opcache.revalidate_freq = 1/'
 
 		log 'configuring php7 ...'
 		cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
@@ -863,9 +871,9 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		for app in $APPS; do
 			log 'installing "%s" ...' "$app"
 			if [ "$app" = "richdocumentscode" ] && [ "$(arch)" = 'aarch64' ]; then
-				occ app:install 'richdocumentscode_arm64'
+				occ app:install 'richdocumentscode_arm64' || warn 'error: install failed for "%s"' "$app"
 			else
-				occ app:install "$app"
+				occ app:install "$app" || warn 'error: install failed for "%s"' "$app"
 			fi
 		done
 	}
@@ -930,11 +938,11 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 	log 'the admin password above is saved in the container at "/root/nextcloud_password"'
 
 	# shellcheck disable=SC2016
-	log 'use `systemd-nspawn -bM %s` to manually start container' "$FQDN"
+	log 'use `systemctl start %s` to manually start container' "$FQDN"
 	# shellcheck disable=SC2016
-	log 'use `systemctl enable systemd-nspawn@%s.service` to automatically start container at boot' "$FQDN"
-	log 'use the wrapper script at '/usr/local/sbin/occ' to run maintenance commands inside the container'
-	log 'use the wrapper script at '/usr/local/sbin/psql' to connect to the nextcloud db inside the container'
+	log 'use `systemctl enable %s` to automatically start container at boot' "$FQDN"
+	log 'use the wrapper script inside the container at '/usr/local/sbin/occ' to run maintenance commands'
+	log 'use the wrapper script inside the container at '/usr/local/sbin/psql' to connect to the nextcloud db'
 }
 
 # check whether the user is trying to get help (with -h or --help)
