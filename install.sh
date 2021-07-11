@@ -17,7 +17,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 
 	log() {
 		msg=$1; shift
-		printf "\n%b$msg%b\n" "$BLUE" "$@" "$NC" >&2
+		printf "\n%b$msg%b\n" "$BLUE" "$@" "$NC"
 	}
 	warn() {
 		msg=$1; shift
@@ -29,7 +29,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 	}
 	prompt() { # does not include newline (so user input is on the same line)
 		msg=$1; shift
-		printf "\n%b$msg%b" "$PURPLE" "$@" "$NC" >&2
+		printf "\n%b$msg%b" "$PURPLE" "$@" "$NC"
 		IFS= read -r var
 		printf "%s" "$var"
 	}
@@ -121,7 +121,7 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		  drawio
 		  files_mindmap
 		  keeweb
-			files_bpm
+		  files_bpm
 		"}'
 	EOF
 }
@@ -456,7 +456,8 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			php7-xml \
 			php7-xmlreader \
 			php7-xmlwriter \
-			php7-zip
+			php7-zip \
+			php7-bcmath
 
 		log 'enabling nginx and php7 ...'
 		rc-update add nginx default
