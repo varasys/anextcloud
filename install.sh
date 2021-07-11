@@ -29,7 +29,7 @@ set -e # fail fast (this is important to ensure downloaded files are properly ve
 	}
 	prompt() { # does not include newline (so user input is on the same line)
 		msg=$1; shift
-		printf "\n%b$msg%b" "$PURPLE" "$@" "$NC"
+		printf "\n%b$msg%b" "$PURPLE" "$@" "$NC" >&2
 		IFS= read -r var
 		printf "%s" "$var"
 	}
@@ -325,9 +325,14 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 		for service in "killprocs" "savecache"; do
 			ln -s "/etc/init.d/$service" "$TARGET/etc/runlevels/shutdown/$service"
 		done
+
+		if [ -d 'letsencrypt' ]; then
+			log 'copying letsencrypt directory into container ...'
+			cp --recursive 'letsencrypt' "$TARGET/etc/"
+		fi
 	}
 
-	{
+	( # use sub-shell due to EXIT trap below
 		log 'copying install script into container ...'
 		mkdir "$TARGET/root/nextcloud"
 		cp "$0" "$TARGET/root/nextcloud/install.sh"
@@ -339,6 +344,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 
 		log 'spawning container ...'
 		mkdir -p "/run/haproxy/$FQDN"
+		trap 'rm -rf "/run/haproxy/$FQDN"' EXIT
 		systemd-nspawn \
 			--directory="$TARGET" \
 			--console=pipe \
@@ -353,8 +359,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 				apk add alpine-base
 				'/root/nextcloud/install.sh' '/root/nextcloud/nextcloud.conf'
 			EOF
-			rm -rf "/run/haproxy/$FQDN"
-	}
+	)
 }
 
 install_nextcloud() { # this function is run in the alpine container, or bare metal/virtual alpine installation
@@ -866,6 +871,16 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 		log 'installing and enabling "files_antivirus" nextcloud app ...'
 		occ app:install 'files_antivirus'
+		occ config:import <<-EOF
+			{
+			  "apps": {
+			    "files_antivirus": {
+			      "av_mode": "socket",
+			      "av_socket": "/run/clamav/clamd.sock"
+			    }
+			  }
+			}
+		EOF
 	}
 
 	{ # install nextcloud apps
