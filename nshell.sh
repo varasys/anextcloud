@@ -29,7 +29,7 @@ print_help() {
 }
 
 if [ "$#" -eq 0 ]; then
-	printf "error: missing arguments\n\n"
+	printf "error: missing arguments\n\n" >&2
 	print_help
 	exit 1
 fi
@@ -42,7 +42,7 @@ fi
 MACHINES=$(machinectl --no-legend list | grep -o "^[^ ]*$1[^ ]*")
 case "$(echo "$MACHINES" | wc -l)" in
 	0)
-		printf 'fatal error: failed to find machine "%s"' "$1"
+		printf 'fatal error: failed to find machine "%s"' "$1" >&2
 		exit 1
 		;;
 	1)
@@ -59,7 +59,7 @@ case "$(echo "$MACHINES" | wc -l)" in
 		exit 0
 		;;
 	*)
-		printf "fatal error: failed to find unique name for \"%s\" in: \n%s\n" "$1" "$MACHINES"
+		printf "fatal error: failed to find unique name for \"%s\" in: \n%s\n" "$1" "$MACHINES" >&2
 		exit 1
 		;;
 esac

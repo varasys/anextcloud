@@ -121,6 +121,7 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		  drawio
 		  files_mindmap
 		  keeweb
+			files_bpm
 		"}'
 	EOF
 }
@@ -914,10 +915,14 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			'/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/'
 
 		cat >> '/etc/php7/php.ini' <<-EOF
+
 			[redis session management]
 			redis.session.locking_enabled=1
 			redis.session.lock_retries=-1
 			redis.session.lock_wait_time=10000
+
+			; https://github.com/nextcloud/vm/issues/2039#issuecomment-875849079
+			apc.enable_cli=1
 		EOF
 	}
 
