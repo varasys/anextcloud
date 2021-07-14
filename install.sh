@@ -98,7 +98,7 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		# fully qualified domain name
 		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
 		# nextcloud version
-		NEXTCLOUD_VER='${NEXTCLOUD_VER:="22"}'
+		NEXTCLOUD_VER='${NEXTCLOUD_VER:="21"}'
 		# nextcloud download url
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/latest-${NEXTCLOUD_VER}.tar.bz2"}'
 		# nextcloud signature download url
@@ -561,7 +561,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 			    ssl_session_tickets off;
 
 			    # modern configuration
-			    ssl_protocols TLSv1.3;
+			    ssl_protocols TLSv1.2 TLSv1.3;
 			    ssl_prefer_server_ciphers off;
 
 			    # OCSP stapling
