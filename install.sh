@@ -143,7 +143,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 
 	if [ "$(id -u)" -ne "0" ]; then
 		warn 'restarting as root ...'
-		exec "$0" "$@"
+		exec sudo "$0" "$@"
 	fi
 
 	load_config "$@"
