@@ -46,6 +46,10 @@ case "$(echo "$MACHINES" | wc -l)" in
 		exit 1
 		;;
 	1)
+		if [ "$(id -u)" -ne "0" ]; then
+			printf "restarting as root ...\n" >&2
+			exec sudo "$0" "$@"
+		fi
 		LEADER=$(machinectl show --property=Leader "$MACHINES")
 		PID="${LEADER##Leader=}"
 		printf "entering namespace for %s (PID %s) ...\n" "$MACHINES" "$PID" >&2
