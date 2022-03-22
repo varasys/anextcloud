@@ -1,4 +1,4 @@
-#!/usr/bin/env sh
+#!/bin/sh
 set -e # fail fast (this is important to ensure downloaded files are properly verified)
 
 # this script must be run as a file, it can't be piped via stdin for two reasons:
@@ -44,7 +44,7 @@ update_file() { # convenience function to run `sed` inplace with multiple expres
 }
 
 is_container() {
-	tr '\0' '\n' < '/proc/1/environ' | grep -q 'container=systemd-nspawn'
+	strings < '/proc/1/environ' | grep -q 'container=systemd-nspawn'
 }
 
 load_config() { # work out where to get config from and source config file if it exists
@@ -54,7 +54,6 @@ load_config() { # work out where to get config from and source config file if it
 	fi
 	if [ -n "$CONF" ]; then
 		log 'sourcing configuration from: "%s"' "$CONF"
-		# shellcheck disable=SC1090
 		. "$CONF"
 	fi
 }
@@ -143,7 +142,7 @@ prepare_container() { # prepare the host by installing alpine linux into the $TA
 
 	if [ "$(id -u)" -ne "0" ]; then
 		warn 'restarting as root ...'
-		exec sudo "$0" "$@"
+		exec sudo -E "$0" "$@"
 	fi
 
 	load_config "$@"
@@ -724,7 +723,6 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 		log 'configuring php7 ...'
 		cp '/etc/php7/php-fpm.d/www.conf' '/etc/php7/php-fpm.d/www.conf.orig'
-		# shellcheck disable=SC2016
 		update_file '/etc/php7/php-fpm.d/www.conf' \
 			'/^user =/ s/.*/user = nginx/' \
 			'/^group =/ s/.*/group = www-data/' \
@@ -958,9 +956,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 	warn "\nNextcloud admin user: 'admin'\nNextcloud admin pass: '%s'" "$ADMIN_PASS"
 	log 'the admin password above is saved in the container at "/root/nextcloud_password"'
 
-	# shellcheck disable=SC2016
 	log 'use `systemctl start %s` to manually start container' "$FQDN"
-	# shellcheck disable=SC2016
 	log 'use `systemctl enable %s` to automatically start container at boot' "$FQDN"
 	log 'use the wrapper script inside the container at '/usr/local/sbin/occ' to run maintenance commands'
 	log 'use the wrapper script inside the container at '/usr/local/sbin/psql' to connect to the nextcloud db'
