@@ -371,7 +371,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 	if [ "$(id -u)" -ne "0" ]; then
 		warn 'restarting as root ...'
-		exec "$0" "$@"
+		exec sudo -E "$0" "$@"
 	fi
 
 	load_config "$@"
