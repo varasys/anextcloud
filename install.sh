@@ -95,17 +95,19 @@ print_alpine_config() { # variables used to setup Alpine Linux
 		# Alpine Linux Config
 
 		# fully qualified domain name
-		FQDN='${FQDN:="${HOSTNAME:="$(hostname -s)"}.${DOMAIN:="$(hostname -d)"}"}'
+		FQDN='${FQDN:="$(hostname -s).$(hostname -d)"}'
+		# postgresql version
+		PG_VERSION='${PG_VERSION:="14"}'
 		# nextcloud version
-		NEXTCLOUD_VER='${NEXTCLOUD_VER:="21"}'
+		NEXTCLOUD_VER='${NEXTCLOUD_VER:="24"}'
 		# nextcloud download url
 		NEXTCLOUD_URL='${NEXTCLOUD_URL:="https://download.nextcloud.com/server/releases/latest-${NEXTCLOUD_VER}.tar.bz2"}'
 		# nextcloud signature download url
 		NEXTCLOUD_SIG='${NEXTCLOUD_SIG:="${NEXTCLOUD_URL}.asc"}'
 		# nextcloud app dir prefix
-		APP_DIR_PREFIX="${APP_DIR_PREFIX:="/usr/local/share"}"
+		APP_DIR_PREFIX="${APP_DIR_PREFIX:="/srv/app"}"
 		# nextcloud data dir
-		DATA_DIR_PREFIX="${DATA_DIR_PREFIX:="/var/lib"}"
+		DATA_DIR_PREFIX="${DATA_DIR_PREFIX:="/srv/data"}"
 		# apps to install
 		APPS='${APPS="
 		  calendar
@@ -386,7 +388,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 
 	{ # install postgresql
 		log 'installing postgresql ...'
-		apk add postgresql postgresql-contrib postgresql-openrc
+		apk add postgresql${PG_VERSION} postgresql${PG_VERSION}-contrib
 		rc-update add postgresql default
 
 		log 'configuring postgresql ...'
@@ -868,7 +870,7 @@ install_nextcloud() { # this function is run in the alpine container, or bare me
 		freshclam --show-progress --foreground
 
 		log 'installing and enabling "files_antivirus" nextcloud app ...'
-		occ app:install 'files_antivirus'
+		occ app:install 'files_antivirus' || warn 'error: install failed for files_antivirus'
 		occ config:import <<-EOF
 			{
 			  "apps": {
