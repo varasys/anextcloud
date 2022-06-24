@@ -1,5 +1,8 @@
 # Nextcloud Installer
 
+## NOTE
+the `install_nextcloud.sh` script uses the native alpine nextcloud package and is better than the other installer.
+
 This project aims to create a reproducible Nextcloud installation in an Alpine Linux filesystem based container run with `systemd-nspawn` and the following configuration:
 
 * alpine linux container OS
