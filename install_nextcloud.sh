@@ -119,6 +119,7 @@ server {
 	}
 }
 EOF
+service nginx start
 
 log "creating ssl certificate utility script \`/usr/local/sbin/certman\` ..."
 mkdir -p /usr/local/sbin
@@ -358,42 +359,11 @@ server {
 EOF
 doc 'nginx root: /usr/share/webapps/nextcloud'
 
-# log 'configuring nginx.conf ...'
-# update_file '/etc/nginx/nginx.conf' \
-# 	'/^\s*client_max_body_size / s/client_max_body_size.*/client_max_body_size 0;/'
-
-# log 'configuring php8 upload file size ...'
-# # https://docs.nextcloud.com/server/latest/admin_manual/configuration_files/big_file_upload_configuration.html
-# update_file '/etc/php8/php.ini' \
-# 	'/^;\?memory_limit \?=/ s/.*/memory_limit = 1G/' \
-# 	'/^;\?upload_max_filesize \?=/ s/.*/upload_max_filesize = 4G/' \
-# 	'/^;\?post_max_size \?=/ s/.*/post_max_size = 4G/' \
-# 	# '/^;\?max_input_time \?=/ s/.*/max_input_time = 3200/' \
-# 	# '/^;\?max_execution_time \?=/ s/.*/max_execution_time = 3200/' \
-
-# log 'configuring php8 opcache ...'
-# # https://docs.nextcloud.com/server/latest/admin_manual/installation/server_tuning.html
-# update_file '/etc/php8/php.ini' \
-# 	'/^;\?opcache.enable \?=/ s/.*/opcache.enable = 1/' \
-# 	'/^;\?opcache.interned_strings_buffer \?=/ s/.*/opcache.interned_strings_buffer = 8/' \
-# 	'/^;\?opcache.max_accelerated_files \?=/ s/.*/opcache.max_accelerated_files = 10000/' \
-# 	'/^;\?opcache.memory_consumption \?=/ s/.*/opcache.memory_consumption = 128/' \
-# 	'/^;\?opcache.save_comments \?=/ s/.*/opcache.save_comments = 1/' \
-# 	'/^;\?opcache.revalidate_freq \?=/ s/.*/opcache.revalidate_freq = 1/'
-
-# log 'configuring php8 ...'
-# cp '/etc/php8/php-fpm.d/www.conf' '/etc/php8/php-fpm.d/www.conf.orig'
-# update_file '/etc/php8/php-fpm.d/www.conf' \
-# 	'/^user =/ s/.*/user = nginx/' \
-# 	'/^group =/ s/.*/group = www-data/' \
-# 	'/^listen =/ s/.*/listen = \/var\/run\/php-fpm7\/php-fpm.sock/' \
-# 	'/^;listen\.owner =/ s/.*/listen.owner = nginx/' \
-# 	'/^;listen\.group =/ s/.*/listen.group = www-data/' \
-# 	's/^;env/env/'
-
+log 'deleting default php-fpm.d/www.conf default config ...'
+rm -f '/etc/php8/php-fpm.d/www.conf' # the default file
 
 log "starting nginx ..."
-service nginx start
+service nginx restart
 log "starting nextcloud ..."
 service nextcloud start
 
@@ -448,49 +418,46 @@ occ config:import <<-EOF
 	}
 EOF
 
-# log 'installing APCu and redis ...'
-# apk add redis php8-pecl-redis redis-openrc php8-pecl-apcu
-# rc-update add redis default
+log 'installing APCu and redis ...'
+apk add redis php8-pecl-redis redis-openrc php8-pecl-apcu
+rc-update add redis default
 
-# log 'configuring redis ...'
-# # do not listen on tcp (only listen on local socket)
-# update_file '/etc/redis.conf' \
-# 	'/^port / s/.*/port 0/'
-# adduser nginx redis
-# adduser nextcloud redis
+log 'configuring redis ...'
+# do not listen on tcp (only listen on local socket)
+update_file '/etc/redis.conf' \
+	'/^port / s/.*/port 0/' \
+	'/^unixsocketperm / s/.*/unixsocketperm 777/' \
+	'/^loglevel / s/.*/loglevel debug/'
+adduser nginx redis
+adduser nextcloud redis
 
-# service redis start
-# service nextcloud restart
+service redis start
 
-# log 'configuring redis caching ...'
-# occ config:import <<EOF
-# {
-# 	"system": {
-# 		"memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
-# 		"memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
-# 		"memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
-# 		"redis": {
-# 			"host": "/run/redis/redis.sock",
-# 			"port": 0
-# 		}
-# 	}
-# }
-# EOF
+log 'configuring redis caching ...'
+occ config:import <<EOF
+{
+	"system": {
+		"memcache.local": "\\\\OC\\\\Memcache\\\\APCu",
+		"memcache.locking": "\\\\OC\\\\Memcache\\\\Redis",
+		"memcache.distributed": "\\\\OC\\\\Memcache\\\\Redis",
+		"redis": {
+			"host": "/run/redis/redis.sock",
+			"port": 0
+		}
+	}
+}
+EOF
 
-# log 'configuring php redis session management ...'
-# update_file '/etc/php8/php.ini' \
-# 	'/^session\.save_handler =/ s/.*/session.save_handler = redis/' \
-# 	'/^;session\.save_path =/ s/.*/session.save_path = "\/run\/redis\/redis.sock"/'
+cat >> '/etc/php8/php.ini' <<-EOF
 
-# cat >> '/etc/php8/php.ini' <<-EOF
+	[redis session management]
+	redis.session.locking_enabled=1
+	redis.session.lock_retries=-1
+	redis.session.lock_wait_time=10000
+EOF
 
-# 	[redis session management]
-# 	redis.session.locking_enabled=1
-# 	redis.session.lock_retries=-1
-# 	redis.session.lock_wait_time=10000
-
-# 	; https://github.com/nextcloud/vm/issues/2039#issuecomment-875849079
-# 	apc.enable_cli=1
-# EOF
+update_file '/etc/php8/php-fpm.d/nextcloud.conf' \
+	'/^php_admin_value\[session.save_path\] = / s/.*/php_admin_value[session.save_path] = \/run\/redis\/redis.sock\nphp_admin_value[session.save_handler] = redis/'
 
 service nextcloud restart
+service nginx restart
