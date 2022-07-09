@@ -2,6 +2,10 @@
 set -e # fail fast
 
 FQDN="${1:-"${FQDN:="$(hostname -f)"}"}"
+OUTDIR="/etc/ssl/nextcloud"
+
+command -v openssl >/dev/null || apk add openssl
+install -d "$OUTDIR"
 
 printf 'creating self signed certificate for: "%s" ...\n\n' "$FQDN"
 openssl req -x509 \
@@ -10,6 +14,6 @@ openssl req -x509 \
 	-newkey ec \
 	-pkeyopt ec_paramgen_curve:secp384r1 \
 	-subj "/CN=$FQDN" \
-	-keyout "$FQDN.key" \
-	-out "$FQDN.crt"
-chmod 600 "$FQDN.key"
+	-keyout "$OUTDIR/key.pem" \
+	-out "$OUTDIR/cert.pem"
+chmod 600 "$OUTDIR/key.pem"

@@ -398,25 +398,25 @@ occ config:import <<-EOF
 	}
 EOF
 
-log 'installing clamav antivirus ...'
-apk add clamav clamav-libunrar
-rc-update add clamd default
-rc-update add freshclam default
-service freshclam start
-service clamd start
+#log 'installing clamav antivirus ...'
+#apk add clamav clamav-libunrar
+#rc-update add clamd default
+#rc-update add freshclam default
+#service freshclam start
+#service clamd start
 
-log 'installing and enabling "files_antivirus" nextcloud app ...'
-occ app:install 'files_antivirus'
-occ config:import <<-EOF
-	{
-		"apps": {
-			"files_antivirus": {
-				"av_mode": "socket",
-				"av_socket": "/run/clamav/clamd.sock"
-			}
-		}
-	}
-EOF
+#log 'installing and enabling "files_antivirus" nextcloud app ...'
+#occ app:install 'files_antivirus'
+#occ config:import <<-EOF
+#	{
+#		"apps": {
+#			"files_antivirus": {
+#				"av_mode": "socket",
+#				"av_socket": "/run/clamav/clamd.sock"
+#			}
+#		}
+#	}
+#EOF
 
 log 'installing APCu and redis ...'
 apk add redis php8-pecl-redis redis-openrc php8-pecl-apcu
