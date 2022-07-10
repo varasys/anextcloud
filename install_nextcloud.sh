@@ -47,8 +47,8 @@ if [ $(id -u) -ne 0 ]; then
 	exec doas "$0" "$@"
 fi
 
-DOC_FILE="./nextcloud.txt"
-printf 'nextcloud installation %s\n' "$(date)" > $DOC_FILE
+DOC_FILE="$HOME/nextcloud.txt"
+doc 'nextcloud installation on %s\n' "$(date)"
 FQDN="${FQDN:-"$(hostname -f)"}"
 doc 'FQDN: %s' "$FQDN"
 PG_VERSION="14"
@@ -85,6 +85,7 @@ END;
 ALTER ROLE nextcloud CREATEDB;
 EOF
 doc 'postgresql user: nextcloud'
+doc 'postgresql password: unset since socket authentication is based on "peer"'
 
 log "installing unbound dns resolver ..." # for nginx resolver
 apk add unbound
@@ -96,15 +97,15 @@ apk add nextcloud nextcloud-initscript nextcloud-default-apps
 rc-update add nextcloud default
 
 log "installing nginx and php ..."
-apk add nginx php8-fpm php8-opcache
+apk add nginx php8-fpm php8-opcache php8-pecl-imagick
 rc-update add nginx default
 
 log "configuring nginx http ..."
 rm -f '/etc/nginx/http.d/default.conf'
 cat > '/etc/nginx/http.d/http.conf' <<EOF
 server {
-	listen 80;
-	listen [::]:80;
+	listen 80 http2;
+	listen [::]:80 http2;
 	server_name $FQDN;
 
 	server_tokens off;
@@ -122,23 +123,24 @@ EOF
 service nginx start
 
 log "creating ssl certificate utility script \`/usr/local/sbin/certman\` ..."
-mkdir -p /usr/local/sbin
+apk add openssl
+install -d "/usr/local/sbin"
 cat > '/usr/local/sbin/certman' <<EOF
 #!/bin/sh -e
 # generate ssl private key and request/renew related certificate
 FQDN="\$(hostname -f)"
 KEYDIR="/etc/ssl/nextcloud"
 install -d "\$KEYDIR"
-if [ "\$1" = "--self-signed" ]; then
+if [ "\$1" = "--self-signed" ] || [ ! -d "/etc/letsencrypt" ]; then
 	printf "generating self signed certificate\n\n"
 	command -v openssl >/dev/null || apk add openssl
-	openssl req -x509 \
-		-nodes \
-		-days 365 \
-		-newkey ec \
-		-pkeyopt ec_paramgen_curve:secp384r1 \
-		-subj "/CN=\$FQDN" \
-		-keyout "\$KEYDIR/key.pem" \
+	openssl req -x509 \\
+		-nodes \\
+		-days 365 \\
+		-newkey ec \\
+		-pkeyopt ec_paramgen_curve:secp384r1 \\
+		-subj "/CN=\$FQDN" \\
+		-keyout "\$KEYDIR/key.pem" \\
 		-out "\$KEYDIR/cert.pem"
 	ln -fs './cert.pem' "\$KEYDIR/ca.pem"
 elif [ -d "/etc/letsencrypt/\$FQDN" ]; then
@@ -148,13 +150,13 @@ elif [ -d "/etc/letsencrypt/\$FQDN" ]; then
 else # request a new letsencrypt certificate
 	printf "requesting new letsencrypt certificate\n\n"
 	command -v certbot >/dev/null || apk add certbot
-	certbot certonly --domain "\$FQDN" \
-		--key-type ecdsa \
-		--elliptic-curve secp384r1 \
-		--webroot \
-		--webroot-path="/var/lib/nginx/html" \
-		--email "admin@\$FQDN" \
-		--agree-tos \
+	certbot certonly --domain "\$FQDN" \\
+		--key-type ecdsa \\
+		--elliptic-curve secp384r1 \\
+		--webroot \\
+		--webroot-path="/var/lib/nginx/html" \\
+		--email "admin@\$FQDN" \\
+		--agree-tos \\
 		--non-interactive
 	ln -fs "../letsencrypt/live/\$FQDN/privkey.pem" "\$KEYDIR/key.pem"
 	ln -fs "../letsencrypt/live/\$FQDN/fullchain.pem" "\$KEYDIR/cert.pem"
@@ -166,12 +168,13 @@ EOF
 chmod +x '/usr/local/sbin/certman'
 
 if [ -f '/etc/ssl/nextcloud/cert.pem' ]; then
-	log 'using existing cert at /etc/ssl/nextcloud/cert.pem'
+	log 'using existing x509 certificate at /etc/ssl/nextcloud/cert.pem'
 else
-	log 'creating self signed cert ...'
+	log 'creating x509 certificate ...'
 	certman
 fi
-doc 'ssl cert directory: %s' "/etc/ssl/nextcloud"
+doc 'ssl cert: %s' "/etc/ssl/nextcloud/cert.pem"
+doc 'ssl key: %s' "/etc/ssl/nextcloud/key.pem"
 
 log "configuring nginx https ..."
 cat > '/etc/nginx/http.d/https.conf' <<EOF
@@ -406,17 +409,18 @@ EOF
 #service clamd start
 
 #log 'installing and enabling "files_antivirus" nextcloud app ...'
-#occ app:install 'files_antivirus'
-#occ config:import <<-EOF
-#	{
-#		"apps": {
-#			"files_antivirus": {
-#				"av_mode": "socket",
-#				"av_socket": "/run/clamav/clamd.sock"
-#			}
-#		}
-#	}
-#EOF
+occ app:install 'files_antivirus'
+occ config:import <<-EOF
+	{
+		"apps": {
+			"files_antivirus": {
+				"av_mode": "daemon",
+				"av_host": "clamav.${FQDN#*.}",
+				"av_port": "3310"
+			}
+		}
+	}
+EOF
 
 log 'installing APCu and redis ...'
 apk add redis php8-pecl-redis redis-openrc php8-pecl-apcu
@@ -454,7 +458,12 @@ cat >> '/etc/php8/php.ini' <<-EOF
 	redis.session.locking_enabled=1
 	redis.session.lock_retries=-1
 	redis.session.lock_wait_time=10000
+
+	apc.enable_cli = 1
 EOF
+
+update_file '/etc/php8/php.ini' \
+	'/^memory_limit = / s/.*/memory_limit = 512M/'
 
 update_file '/etc/php8/php-fpm.d/nextcloud.conf' \
 	'/^php_admin_value\[session.save_path\] = / s/.*/php_admin_value[session.save_path] = \/run\/redis\/redis.sock\nphp_admin_value[session.save_handler] = redis/'

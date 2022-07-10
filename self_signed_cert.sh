@@ -1,7 +1,7 @@
 #!/bin/sh
-set -e # fail fast
+set -eu # fail fast
 
-FQDN="${1:-"${FQDN:="$(hostname -f)"}"}"
+FQDN="${1:-"${FQDN:-"$(hostname -f)"}"}"
 OUTDIR="/etc/ssl/nextcloud"
 
 command -v openssl >/dev/null || apk add openssl
@@ -17,3 +17,4 @@ openssl req -x509 \
 	-keyout "$OUTDIR/key.pem" \
 	-out "$OUTDIR/cert.pem"
 chmod 600 "$OUTDIR/key.pem"
+ln -fs "cert.pem" "$OUTDIR/ca.pem"
