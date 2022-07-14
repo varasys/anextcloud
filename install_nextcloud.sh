@@ -225,6 +225,7 @@ server {
 	client_max_body_size 512M;
 	client_body_timeout 300s;
 	fastcgi_buffers 64 4K;
+	fastcgi_read_timeout 3600s;
 
 	# Enable gzip but do not remove ETag headers
 	gzip on;
