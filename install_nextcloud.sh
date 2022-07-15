@@ -8,41 +8,40 @@ readonly BLUE='\e[0;34;1m'
 readonly PURPLE='\e[0;35;1m'
 
 log() {
-	local readonly msg="$1"; shift
+	msg="$1"; shift
 	printf "\n%b$msg%b\n" "$BLUE" "$@" "$NC"
 }
 doc() { # save important information to an installation log file
 	log "$@"
-	local readonly msg="$1"; shift
+	msg="$1"; shift
+	# shellcheck disable=SC2059
 	printf "$msg\n" "$@" >> "$DOC_FILE"
 }
 warn() {
-	local readonly msg="$1"; shift
+	msg="$1"; shift
 	printf "\n%b$msg%b\n" "$YELLOW" "$@" "$NC" >&2
 }
 error() {
-	local readonly msg="$1"; shift
+	msg="$1"; shift
 	printf "\n%b$msg%b\n" "$RED" "$@" "$NC" >&2
 }
 prompt() { # does not include newline (so user input is on the same line)
-	local readonly msg="$1"; shift
+	msg="$1"; shift
 	printf "\n%b$msg%b" "$PURPLE" "$@" "$NC" >&2
-	local var
 	IFS= read -r var
 	printf "%s" "$var"
 }
 
 update_file() { # convenience function to run `sed` inplace with multiple expressions
-	local readonly file="$1"
+	file="$1"
 	shift
 	cp "$file" "$file.orig"
-	local exp
 	for exp in "$@"; do
 		sed -i "$exp" "$file"
 	done
 }
 
-if [ $(id -u) -ne 0 ]; then
+if [ "$(id -u)" -ne 0 ]; then
 	log "restarting as root ..."
 	exec doas "$0" "$@"
 fi
@@ -52,7 +51,6 @@ doc 'nextcloud installation on %s\n' "$(date)"
 FQDN="${FQDN:-"$(hostname -f)"}"
 doc 'FQDN: %s' "$FQDN"
 PG_VERSION="14"
-doc 'postgresql version: %s' "$PG_VERSION"
 
 apk update
 apk upgrade
@@ -87,10 +85,10 @@ EOF
 doc 'postgresql user: nextcloud'
 doc 'postgresql password: unset since socket authentication is based on "peer"'
 
-log "installing unbound dns resolver ..." # for nginx resolver
-apk add unbound
-rc-update add unbound default
-service unbound start
+# log "installing unbound dns resolver ..." # for nginx resolver
+# apk add unbound
+# rc-update add unbound default
+# service unbound start
 
 log "installing nextcloud ..."
 apk add nextcloud nextcloud-initscript nextcloud-default-apps
@@ -106,6 +104,7 @@ cat > '/etc/nginx/http.d/http.conf' <<EOF
 server {
 	listen 80 http2;
 	listen [::]:80 http2;
+	listen unix:/var/run/nginx/http.sock http2;
 	server_name $FQDN;
 
 	server_tokens off;
@@ -192,6 +191,7 @@ map \$arg_v \$asset_immutable {
 server {
 	listen 443 ssl http2;
 	listen [::]:443 ssl http2;
+	listen unix:/var/run/nginx/https.sock ssl http2;
 	server_name $FQDN;
 
 	root /usr/share/webapps/nextcloud;
@@ -215,8 +215,8 @@ server {
 	# verify chain of trust of OCSP response using Root CA and Intermediate certs
 	ssl_trusted_certificate /etc/ssl/nextcloud/ca.pem;
 
-	# use local instance of 'unbound' dns resolver
-	resolver 127.0.0.1;
+	# # use local dns resolver
+	# resolver 127.0.0.1;
 
 	# Prevent nginx HTTP Server Detection
 	server_tokens off;
@@ -309,7 +309,7 @@ server {
 	# then Nginx will encounter an infinite rewriting loop when it prepends \`/index.php\`
 	# to the URI, resulting in a HTTP 500 error response.
 	location ~ \\.php(?:$|/) {
-		# Required for legacy support
+		# Required for legacy support (remove this to allow /phpinfo.php for debugging)
 		rewrite ^/(?!index|remote|public|cron|core\\/ajax\\/update|status|ocs\\/v[12]|updater\\/.+|oc[ms]-provider\\/.+|.+\\/richdocumentscode\\/proxy) /index.php\$request_uri;
 
 		fastcgi_split_path_info ^(.+?\\.php)(/.*)\$;
@@ -368,6 +368,11 @@ rm -f '/etc/php8/php-fpm.d/www.conf' # the default file
 
 log "starting nginx ..."
 service nginx restart
+
+log "configuring php memory limit ..."
+update_file '/etc/php8/php.ini' \
+	'/^memory_limit = / s/.*/memory_limit = 512M/'
+
 log "starting nextcloud ..."
 service nextcloud start
 
@@ -462,9 +467,6 @@ cat >> '/etc/php8/php.ini' <<-EOF
 
 	apc.enable_cli = 1
 EOF
-
-update_file '/etc/php8/php.ini' \
-	'/^memory_limit = / s/.*/memory_limit = 512M/'
 
 update_file '/etc/php8/php-fpm.d/nextcloud.conf' \
 	'/^php_admin_value\[session.save_path\] = / s/.*/php_admin_value[session.save_path] = \/run\/redis\/redis.sock\nphp_admin_value[session.save_handler] = redis/'
