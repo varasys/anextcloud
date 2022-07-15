@@ -7,9 +7,8 @@ if [ $# -lt 1 ]; then
 	printf "missing device argument(s)\n" >&2
 	exit 1
 fi
-exit 3
 
-sudo zpool create \
+zpool create \
 	-o ashift=12 \
 	-o autotrim=on \
 	-O acltype=posixacl \
