@@ -497,3 +497,4 @@ done
 
 service nextcloud restart
 service nginx restart
+log 'finished installing nextcloud'
