@@ -471,5 +471,29 @@ EOF
 update_file '/etc/php8/php-fpm.d/nextcloud.conf' \
 	'/^php_admin_value\[session.save_path\] = / s/.*/php_admin_value[session.save_path] = \/run\/redis\/redis.sock\nphp_admin_value[session.save_handler] = redis/'
 
+log 'installing nextcloud apps ...'
+APPS='calendar
+	contacts
+	richdocuments
+	richdocumentscode
+	groupfolders
+	notes
+	tasks
+	twofactor_totp
+	spreed
+	drawio
+	files_mindmap
+	keeweb
+'
+
+for app in $APPS; do
+	log 'installing nextcloud app: "%s" ...\n' "$app"
+	if [ "$app" = "richdocumentscode" ] && [ "$(arch)" = 'aarch64' ]; then
+		occ app:install 'richdocumentscode_arm64' || warn 'error: install failed for "%s"' "$app"
+	else
+		occ app:install "$app" || warn 'error: install failed for "%s"' "$app"
+	fi
+done
+
 service nextcloud restart
 service nginx restart
